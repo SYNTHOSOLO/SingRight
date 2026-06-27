@@ -1,0 +1,602 @@
+{
+    "en001a": {
+        "songname": "Alphabet",
+        "key_diff": 0,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en001b": {
+        "songname": "Alphabet",
+        "key_diff": -3,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en002a": {
+        "songname": "Angels we have heard on high",
+        "key_diff": 0,
+        "tempo": 111,
+        "time_signature": "4/4"
+    },
+    "en002b": {
+        "songname": "Angels we have heard on high",
+        "key_diff": -4,
+        "tempo": 111,
+        "time_signature": "4/4"
+    },
+    "en003a": {
+        "songname": "Three bears",
+        "key_diff": 0,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en003b": {
+        "songname": "Three bears",
+        "key_diff": 2,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en004a": {
+        "songname": "Bingo",
+        "key_diff": 0,
+        "tempo": 120,
+        "time_signature": "4/4"
+    },
+    "en004b": {
+        "songname": "Bingo",
+        "key_diff": -4,
+        "tempo": 120,
+        "time_signature": "4/4"
+    },
+    "en005a": {
+        "songname": "Butterfly",
+        "key_diff": 0,
+        "tempo": 65,
+        "time_signature": "4/4"
+    },
+    "en005b": {
+        "songname": "Butterfly",
+        "key_diff": -6,
+        "tempo": 65,
+        "time_signature": "4/4"
+    },
+    "en006a": {
+        "songname": "White christmas",
+        "key_diff": 0,
+        "tempo": 90,
+        "time_signature": "4/4"
+    },
+    "en006b": {
+        "songname": "White christmas",
+        "key_diff": -4,
+        "tempo": 90,
+        "time_signature": "4/4"
+    },
+    "en007a": {
+        "songname": "Clementine",
+        "key_diff": 0,
+        "tempo": 87,
+        "time_signature": "3/4"
+    },
+    "en007b": {
+        "songname": "Clementine",
+        "key_diff": -3,
+        "tempo": 87,
+        "time_signature": "3/4"
+    },
+    "en008a": {
+        "songname": "Cockroach",
+        "key_diff": 0,
+        "tempo": 70,
+        "time_signature": "4/4"
+    },
+    "en008b": {
+        "songname": "Cockroach",
+        "key_diff": 4,
+        "tempo": 70,
+        "time_signature": "4/4"
+    },
+    "en009a": {
+        "songname": "Do like this",
+        "key_diff": 0,
+        "tempo": 130,
+        "time_signature": "4/4"
+    },
+    "en009b": {
+        "songname": "Do like this",
+        "key_diff": 4,
+        "tempo": 130,
+        "time_signature": "4/4"
+    },
+    "en010a": {
+        "songname": "Santa claus is coming to town",
+        "key_diff": 0,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en010b": {
+        "songname": "Santa claus is coming to town",
+        "key_diff": -2,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en011a": {
+        "songname": "Do Re Mi",
+        "key_diff": 0,
+        "tempo": 128,
+        "time_signature": "4/4"
+    },
+    "en011b": {
+        "songname": "Do Re Mi",
+        "key_diff": -3,
+        "tempo": 128,
+        "time_signature": "4/4"
+    },
+    "en012a": {
+        "songname": "O come all ye faithful",
+        "key_diff": 0,
+        "tempo": 108,
+        "time_signature": "4/4"
+    },
+    "en012b": {
+        "songname": "O come all ye faithful",
+        "key_diff": -4,
+        "tempo": 108,
+        "time_signature": "4/4"
+    },
+    "en013a": {
+        "songname": "The finger familly",
+        "key_diff": 0,
+        "tempo": 112,
+        "time_signature": "4/4"
+    },
+    "en013b": {
+        "songname": "The finger familly",
+        "key_diff": 3,
+        "tempo": 112,
+        "time_signature": "4/4"
+    },
+    "en014a": {
+        "songname": "The first noel",
+        "key_diff": 0,
+        "tempo": 95,
+        "time_signature": "3/4"
+    },
+    "en014b": {
+        "songname": "The first noel",
+        "key_diff": -3,
+        "tempo": 95,
+        "time_signature": "3/4"
+    },
+    "en015a": {
+        "songname": "Five little monkeys jumping on the bed",
+        "key_diff": 0,
+        "tempo": 70,
+        "time_signature": "4/4"
+    },
+    "en015b": {
+        "songname": "Five little monkeys jumping on the bed",
+        "key_diff": 3,
+        "tempo": 70,
+        "time_signature": "4/4"
+    },
+    "en016a": {
+        "songname": "My grandfather's clock",
+        "key_diff": 0,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en016b": {
+        "songname": "My grandfather's clock",
+        "key_diff": -4,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en017a": {
+        "songname": "Head shoulders knees and toes",
+        "key_diff": 0,
+        "tempo": 126,
+        "time_signature": "4/4"
+    },
+    "en017b": {
+        "songname": "Head shoulders knees and toes",
+        "key_diff": -4,
+        "tempo": 126,
+        "time_signature": "4/4"
+    },
+    "en018a": {
+        "songname": "Hokey pokey",
+        "key_diff": 0,
+        "tempo": 130,
+        "time_signature": "4/4"
+    },
+    "en018b": {
+        "songname": "Hokey pokey",
+        "key_diff": -3,
+        "tempo": 130,
+        "time_signature": "4/4"
+    },
+    "en019a": {
+        "songname": "O holy night",
+        "key_diff": 0,
+        "tempo": 77,
+        "time_signature": "4/4"
+    },
+    "en019b": {
+        "songname": "O holy night",
+        "key_diff": -3,
+        "tempo": 77,
+        "time_signature": "4/4"
+    },
+    "en020a": {
+        "songname": "Ten little indians",
+        "key_diff": 0,
+        "tempo": 120,
+        "time_signature": "4/4"
+    },
+    "en020b": {
+        "songname": "Ten little indians",
+        "key_diff": -5,
+        "tempo": 120,
+        "time_signature": "4/4"
+    },
+    "en021a": {
+        "songname": "Jingle bells",
+        "key_diff": 0,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en021b": {
+        "songname": "Jingle bells",
+        "key_diff": -5,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en022a": {
+        "songname": "Joy to the world",
+        "key_diff": 0,
+        "tempo": 107,
+        "time_signature": "4/4"
+    },
+    "en022b": {
+        "songname": "Joy to the world",
+        "key_diff": -5,
+        "tempo": 107,
+        "time_signature": "4/4"
+    },
+    "en023a": {
+        "songname": "Auld lang syne",
+        "key_diff": 0,
+        "tempo": 72,
+        "time_signature": "4/4"
+    },
+    "en023b": {
+        "songname": "Auld lang syne",
+        "key_diff": 5,
+        "tempo": 72,
+        "time_signature": "4/4"
+    },
+    "en024a": {
+        "songname": "Little bo peep",
+        "key_diff": 0,
+        "tempo": 80,
+        "time_signature": "3/4"
+    },
+    "en024b": {
+        "songname": "Little bo peep",
+        "key_diff": -3,
+        "tempo": 80,
+        "time_signature": "3/4"
+    },
+    "en025a": {
+        "songname": "If all the little raindrops",
+        "key_diff": 0,
+        "tempo": 110,
+        "time_signature": "4/4"
+    },
+    "en025b": {
+        "songname": "If all the little raindrops",
+        "key_diff": 2,
+        "tempo": 110,
+        "time_signature": "4/4"
+    },
+    "en026a": {
+        "songname": "Little robin red breast",
+        "key_diff": 0,
+        "tempo": 97,
+        "time_signature": "4/4"
+    },
+    "en026b": {
+        "songname": "Little robin red breast",
+        "key_diff": 3,
+        "tempo": 97,
+        "time_signature": "4/4"
+    },
+    "en027a": {
+        "songname": "The cute little fellow",
+        "key_diff": 0,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en027b": {
+        "songname": "The cute little fellow",
+        "key_diff": -4,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en028a": {
+        "songname": "London bridge is falling down",
+        "key_diff": 0,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en028b": {
+        "songname": "London bridge is falling down",
+        "key_diff": -4,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en029a": {
+        "songname": "Mary had a little lamb",
+        "key_diff": 0,
+        "tempo": 75,
+        "time_signature": "4/4"
+    },
+    "en029b": {
+        "songname": "Mary had a little lamb",
+        "key_diff": 3,
+        "tempo": 75,
+        "time_signature": "4/4"
+    },
+    "en030a": {
+        "songname": "We wish you a merry christmas",
+        "key_diff": 0,
+        "tempo": 125,
+        "time_signature": "4/4"
+    },
+    "en030b": {
+        "songname": "We wish you a merry christmas",
+        "key_diff": -2,
+        "tempo": 125,
+        "time_signature": "4/4"
+    },
+    "en031a": {
+        "songname": "The muffin man",
+        "key_diff": 0,
+        "tempo": 89,
+        "time_signature": "4/4"
+    },
+    "en031b": {
+        "songname": "The muffin man",
+        "key_diff": 3,
+        "tempo": 89,
+        "time_signature": "4/4"
+    },
+    "en032a": {
+        "songname": "I'm the music man",
+        "key_diff": 0,
+        "tempo": 110,
+        "time_signature": "4/4"
+    },
+    "en032b": {
+        "songname": "I'm the music man",
+        "key_diff": -4,
+        "tempo": 110,
+        "time_signature": "4/4"
+    },
+    "en033a": {
+        "songname": "Home sweet home",
+        "key_diff": 0,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en033b": {
+        "songname": "Home sweet home",
+        "key_diff": 4,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en034a": {
+        "songname": "One for sorrow",
+        "key_diff": 0,
+        "tempo": 80,
+        "time_signature": "4/4"
+    },
+    "en034b": {
+        "songname": "One for sorrow",
+        "key_diff": -2,
+        "tempo": 80,
+        "time_signature": "4/4"
+    },
+    "en035a": {
+        "songname": "Over the rainbow",
+        "key_diff": 0,
+        "tempo": 68,
+        "time_signature": "4/4"
+    },
+    "en035b": {
+        "songname": "Over the rainbow",
+        "key_diff": 2,
+        "tempo": 68,
+        "time_signature": "4/4"
+    },
+    "en036a": {
+        "songname": "Pop goes the weasel",
+        "key_diff": 0,
+        "tempo": 90,
+        "time_signature": "4/4"
+    },
+    "en036b": {
+        "songname": "pop goes the weasel",
+        "key_diff": -3,
+        "tempo": 90,
+        "time_signature": "4/4"
+    },
+    "en037a": {
+        "songname": "Rock a bye baby",
+        "key_diff": 0,
+        "tempo": 97,
+        "time_signature": "3/4"
+    },
+    "en037b": {
+        "songname": "Rock a bye baby",
+        "key_diff": -3,
+        "tempo": 97,
+        "time_signature": "3/4"
+    },
+    "en038a": {
+        "songname": "Row row row your boat",
+        "key_diff": 0,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en038b": {
+        "songname": "Row row row your boat",
+        "key_diff": -3,
+        "tempo": 100,
+        "time_signature": "4/4"
+    },
+    "en039a": {
+        "songname": "Rudolph the red nosed reindeer",
+        "key_diff": 0,
+        "tempo": 130,
+        "time_signature": "4/4"
+    },
+    "en039b": {
+        "songname": "Rudolph the red nosed reindeer",
+        "key_diff": -3,
+        "tempo": 130,
+        "time_signature": "4/4"
+    },
+    "en040a": {
+        "songname": "Skip to my lou",
+        "key_diff": 0,
+        "tempo": 85,
+        "time_signature": "3/4"
+    },
+    "en040b": {
+        "songname": "Skip to my lou",
+        "key_diff": 3,
+        "tempo": 85,
+        "time_signature": "3/4"
+    },
+    "en041a": {
+        "songname": "Itsy bitsy spider",
+        "key_diff": 0,
+        "tempo": 113,
+        "time_signature": "4/4"
+    },
+    "en041b": {
+        "songname": "Itsy bitsy spider",
+        "key_diff": -4,
+        "tempo": 113,
+        "time_signature": "4/4"
+    },
+    "en042a": {
+        "songname": "Twinkle twinkle little star",
+        "key_diff": 0,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en042b": {
+        "songname": "Twinkle twinkle little star",
+        "key_diff": 3,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en043a": {
+        "songname": "Teddy says",
+        "key_diff": 0,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en043b": {
+        "songname": "Teddy says",
+        "key_diff": -3,
+        "tempo": 85,
+        "time_signature": "4/4"
+    },
+    "en044a": {
+        "songname": "This old man",
+        "key_diff": 0,
+        "tempo": 80,
+        "time_signature": "4/4"
+    },
+    "en044b": {
+        "songname": "This old man",
+        "key_diff": 3,
+        "tempo": 80,
+        "time_signature": "4/4"
+    },
+    "en045a": {
+        "songname": "A tisket a tasket",
+        "key_diff": 0,
+        "tempo": 90,
+        "time_signature": "4/4"
+    },
+    "en045b": {
+        "songname": "A tisket a tasket",
+        "key_diff": -3,
+        "tempo": 90,
+        "time_signature": "4/4"
+    },
+    "en046a": {
+        "songname": "Together",
+        "key_diff": 0,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en046b": {
+        "songname": "Together",
+        "key_diff": -4,
+        "tempo": 115,
+        "time_signature": "4/4"
+    },
+    "en047a": {
+        "songname": "Oh dear what can the matter be",
+        "key_diff": 0,
+        "tempo": 75,
+        "time_signature": "6/8"
+    },
+    "en047b": {
+        "songname": "Oh dear what can the matter be",
+        "key_diff": -3,
+        "tempo": 75,
+        "time_signature": "6/8"
+    },
+    "en048a": {
+        "songname": "Look out the window",
+        "key_diff": 0,
+        "tempo": 125,
+        "time_signature": "4/4"
+    },
+    "en048b": {
+        "songname": "Look out the window",
+        "key_diff": -6,
+        "tempo": 125,
+        "time_signature": "4/4"
+    },
+    "en049a": {
+        "songname": "I've been working on the railroad",
+        "key_diff": 0,
+        "tempo": 96,
+        "time_signature": "4/4"
+    },
+    "en049b": {
+        "songname": "I've been working on the railroad",
+        "key_diff": -3,
+        "tempo": 96,
+        "time_signature": "4/4"
+    },
+    "en050a": {
+        "songname": "When you and I where young maggie",
+        "key_diff": 0,
+        "tempo": 140,
+        "time_signature": "4/4"
+    },
+    "en050b": {
+        "songname": "When you and I where young maggie",
+        "key_diff": 3,
+        "tempo": 140,
+        "time_signature": "4/4"
+    }
+}
