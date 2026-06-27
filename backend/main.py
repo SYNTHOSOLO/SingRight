@@ -117,9 +117,9 @@ async def entrypoint(ctx: JobContext) -> None:
         modalities=["audio", "text"],
         turn_detection=TurnDetection(
             type="server_vad",
-            threshold=0.5,
-            prefix_padding_ms=300,
-            silence_duration_ms=600,
+            threshold=0.45,        # slightly more sensitive than 0.5
+            prefix_padding_ms=200,
+            silence_duration_ms=400,  # respond faster after user stops talking
         ),
     )
 

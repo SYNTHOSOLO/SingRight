@@ -72,10 +72,10 @@ function pitchToPercent(hz: number): number {
 // ---------------------------------------------------------------------------
 
 export default function VocalDashboard() {
-  // ── LiveKit connection state ──────────────────────────────────────────
+  // ── LiveKit connection state ──────────────────────────────────────────────────
   const connectionState = useConnectionState();
   const isConnected = connectionState === ConnectionState.Connected;
-  const { microphoneTrack } = useLocalParticipant();
+  const { microphoneTrack, localParticipant } = useLocalParticipant();
 
   // ── Dashboard state ──────────────────────────────────────────────────
   const [coachingMode, setCoachingMode] = useState<"karaoke" | "conversational">("karaoke");
@@ -384,6 +384,8 @@ export default function VocalDashboard() {
 
   const handleSessionToggle = useCallback(async () => {
     if (isActive) {
+      // Stop publishing mic to LiveKit so agent stops hearing us
+      await localParticipant.setMicrophoneEnabled(false);
       backingTrack.stop();
       stop();
       setSessionElapsed(0);
@@ -394,10 +396,14 @@ export default function VocalDashboard() {
 
     setMicError(null);
     try {
-      const track = microphoneTrack?.track;
-      const stream = track
-        ? new MediaStream([track.mediaStreamTrack])
-        : undefined;
+      // 1. Publish mic to LiveKit room so the backend agent can hear us.
+      //    setMicrophoneEnabled returns the LocalTrackPublication directly.
+      const pub = await localParticipant.setMicrophoneEnabled(true);
+
+      // 2. Wire the same mic track into our Web Audio analyser.
+      //    Use the returned publication's track to avoid stale React state.
+      const mediaTrack = pub?.track?.mediaStreamTrack;
+      const stream = mediaTrack ? new MediaStream([mediaTrack]) : undefined;
       await start(stream);
 
       if (coachingMode === "karaoke") {
@@ -408,7 +414,8 @@ export default function VocalDashboard() {
         err instanceof Error ? err.message : "Failed to start microphone."
       );
     }
-  }, [isActive, backingTrack, stop, microphoneTrack, start, coachingMode]);
+  }, [isActive, backingTrack, stop, localParticipant, start, coachingMode]);
+
 
   // Start/stop backing track when coaching mode changes mid-session
   useEffect(() => {
