@@ -23,7 +23,7 @@ import { useSongPlayback } from "@/hooks/useSongPlayback";
 import { useSyllableTracker } from "@/hooks/useSyllableTracker";
 import { SONG_EN001A } from "@/lib/songs/en001a";
 import { VOLUME_SILENCE_THRESHOLD_DB } from "@/lib/songs/pitch";
-import SyllableLyrics from "@/components/SyllableLyrics";
+import PitchLane from "@/components/PitchLane";
 import PitchContourChart from "@/components/PitchContourChart";
 import PerformanceIssues from "@/components/PerformanceIssues";
 
@@ -364,20 +364,39 @@ export default function VocalDashboard() {
   }, [coachingMode, isConnected, sendTelemetry]);
 
   // ── Lyric timer synced to reference audio (karaoke) or wall clock ─────
+  const sessionStartRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!isActive) return;
+    sessionStartRef.current = performance.now();
+  }, [isActive]);
+
   useEffect(() => {
     if (isPaused || !isActive) return;
 
-    const id = setInterval(() => {
-      const elapsed =
-        coachingMode === "karaoke"
-          ? songPlayback.getCurrentTime()
-          : undefined;
+    let rafId: number;
+    const tick = () => {
+      if (coachingMode === "karaoke") {
+        const audioTime = songPlayback.getCurrentTime();
+        if (audioTime > 0) {
+          // Audio is running — use its timestamp (authoritative for syllable sync)
+          setSessionElapsed(audioTime);
+        } else {
+          // Audio not yet loaded — advance via wall clock so lane scrolls immediately
+          const wallSec = (performance.now() - sessionStartRef.current) / 1000;
+          setSessionElapsed(wallSec);
+        }
+      } else {
+        const wallSec = (performance.now() - sessionStartRef.current) / 1000;
+        setSessionElapsed(wallSec);
+      }
+      rafId = requestAnimationFrame(tick);
+    };
 
-      setSessionElapsed((prev) => elapsed ?? prev + 1);
-    }, coachingMode === "karaoke" ? 100 : 1000);
-
-    return () => clearInterval(id);
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
   }, [isPaused, isActive, coachingMode, songPlayback]);
+
 
   // ── Derived values (smoothed for stable meter rendering) ──────────────
   const volumePct = dbToPercent(displayMetrics.volumeDb);
@@ -598,7 +617,7 @@ export default function VocalDashboard() {
               <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
                 <Music className="h-4 w-4 text-violet-400" />
                 <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                  Lyric Display — {ACTIVE_SONG.metadata.songname}
+                  Pitch Lane — {ACTIVE_SONG.metadata.songname}
                 </h2>
                 {isPaused && (
                   <span className="ml-auto flex items-center gap-1 text-xs text-amber-400">
@@ -612,12 +631,16 @@ export default function VocalDashboard() {
                 )}
               </div>
 
-              <SyllableLyrics
-                song={ACTIVE_SONG}
-                activeLyricLineIdx={syllableTracker.activeLyricLineIdx}
-                activeSyllableToken={syllableTracker.activeSyllable?.token ?? null}
-                completedResults={syllableTracker.completedResults}
-              />
+              <div className="p-3">
+                <PitchLane
+                  song={ACTIVE_SONG}
+                  elapsedSec={sessionElapsed}
+                  livePitchHz={displayMetrics.frequencyHz}
+                  activeSyllable={syllableTracker.activeSyllable}
+                  pitchDeltaCents={syllableTracker.pitchDeltaCents}
+                  completedResults={syllableTracker.completedResults}
+                />
+              </div>
             </section>
           ) : (
             <section className="glass-card glow-violet overflow-hidden">
