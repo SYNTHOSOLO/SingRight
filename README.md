@@ -4,41 +4,7 @@ A real-time AI-powered vocal coaching application built with **Next.js**, **Live
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Browser (Next.js Frontend)                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────────────┐  │
-│  │ Mic Capture  │→ │ Web Audio   │→ │ useVocalAnalyzer Hook  │  │
-│  │ (getUserMedia)│  │ AnalyserNode│  │ RMS→dB + Autocorr.    │  │
-│  └─────────────┘  └─────────────┘  │ Pitch Detection        │  │
-│                                     └──────────┬─────────────┘  │
-│                                                │                │
-│  ┌─────────────────────────────────────────────▼──────────────┐ │
-│  │ VocalDashboard — LiveKit Data Channels                     │ │
-│  │  • Sends VOCAL_METRICS every 250ms                         │ │
-│  │  • Sends CRITICAL_ERROR on debug triggers                  │ │
-│  │  • Receives PAUSE_TRACK / RESUME_TRACK / SHOW_TIPS         │ │
-│  └─────────────────────────────────────────────┬──────────────┘ │
-└────────────────────────────────────────────────│────────────────┘
-                                                 │ WebRTC
-                                                 ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  LiveKit Server (SFU)                                           │
-└────────────────────────────────────────────────│────────────────┘
-                                                 │
-                                                 ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Python Agent Backend (LiveKit Agents)                           │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ VocalCoachAgent (livekit-agents)                          │   │
-│  │  • OpenAI Realtime Model (shimmer voice, VAD)            │   │
-│  │  • @llm.ai_callable: control_session_playback            │   │
-│  │  • data_received listener:                                │   │
-│  │    – VOCAL_METRICS → inject into conversation context     │   │
-│  │    – CRITICAL_ERROR → interrupt + pause + barge-in        │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
+![System architecture diagram](images/diagram.png)
 
 ## Data Protocol
 
@@ -48,7 +14,8 @@ A real-time AI-powered vocal coaching application built with **Next.js**, **Live
 | Client → Agent | `VOCAL_METRICS` | `{ "type": "VOCAL_METRICS", "volume_db": -22.4, "pitch_hz": 277.2, "syllable": "b_ii", "expected_pitch_hz": 277.2, "pitch_delta_cents": -42, "on_pitch": false }` |
 | Client → Agent | `SYLLABLE_RESULT` | `{ "type": "SYLLABLE_RESULT", "syllable": "b_ii", "issue": "sharp", "pitch_error_cents": 42 }` |
 | Client → Agent | `CRITICAL_ERROR` | `{ "type": "CRITICAL_ERROR", "reason": "PITCH_OFF_TARGET", "syllable": "b_ii", "expected_hz": 277.2, "actual_hz": 295.0 }` |
-| Agent → Client | Session Control | `{ "action": "PAUSE_TRACK" \| "RESUME_TRACK", "coach_notes": "..." }` |
+| Client → Agent | `ANALYSIS_SNAPSHOT` | `{ "type": "ANALYSIS_SNAPSHOT", "pitch_hz": 277.2, "pitch_confidence": 0.82, "clarity": 0.65, "note_name": "C#4" }` |
+| Agent → Client | Session Control | `{ "action": "PAUSE_TRACK" \| "RESUME_TRACK" \| "PLAY_REFERENCE_TONE" \| "PLAY_LYRIC_LINE" \| "REQUEST_ANALYSIS", ... }` |
 
 ## Getting Started
 

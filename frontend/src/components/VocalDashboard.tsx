@@ -1,8 +1,15 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useDataChannel, useConnectionState, useTranscriptions, useLocalParticipant } from "@livekit/components-react";
-import { ConnectionState } from "livekit-client";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useDataChannel,
+  useConnectionState,
+  useTranscriptions,
+  useLocalParticipant,
+  useRemoteParticipants,
+} from "@livekit/components-react";
+import { ConnectionState, RemoteAudioTrack } from "livekit-client";
+import type { DataPublishOptions } from "livekit-client";
 import {
   Mic,
   MicOff,
@@ -17,15 +24,27 @@ import {
   TriangleAlert,
   Headphones,
   MessageSquare,
+  Eye,
+  EyeOff,
+  Guitar,
+  Piano,
 } from "lucide-react";
 import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
 import { useSongPlayback } from "@/hooks/useSongPlayback";
 import { useSyllableTracker } from "@/hooks/useSyllableTracker";
+import { useTonePlayer } from "@/hooks/useTonePlayer";
 import { SONG_EN001A } from "@/lib/songs/en001a";
 import { VOLUME_SILENCE_THRESHOLD_DB } from "@/lib/songs/pitch";
 import PitchLane from "@/components/PitchLane";
 import PitchContourChart from "@/components/PitchContourChart";
 import PerformanceIssues from "@/components/PerformanceIssues";
+import LiveSoundEnergy from "@/components/LiveSoundEnergy";
+import InstrumentNoteBoard from "@/components/InstrumentNoteBoard";
+import { hzToNoteName, type DemoInstrument } from "@/lib/audio/notes";
+import {
+  parsePlayRequest,
+  playRequestKey,
+} from "@/lib/audio/playRequestParser";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -38,6 +57,41 @@ const PITCH_HOLD_MS = 250;
 const METRIC_SMOOTHING = 0.35;
 const AUTO_FAULT_COOLDOWN_MS = 5000;
 const AUTO_FAULT_DELAY_MS = 1500;
+const VISUAL_CUE_FADE_MS = 3500;
+
+type VisualCueTone = "positive" | "corrective" | "neutral";
+
+interface VisualCue {
+  text: string;
+  tone: VisualCueTone;
+}
+
+interface TranscriptLine {
+  isAgent: boolean;
+  text: string;
+  key: string;
+}
+
+const VISUAL_CUE_STYLES: Record<
+  VisualCueTone,
+  { bg: string; text: string; glow: string }
+> = {
+  positive: {
+    bg: "from-emerald-500/25 to-teal-500/20",
+    text: "text-emerald-200",
+    glow: "shadow-emerald-500/30",
+  },
+  corrective: {
+    bg: "from-amber-500/25 to-rose-500/20",
+    text: "text-amber-100",
+    glow: "shadow-amber-500/30",
+  },
+  neutral: {
+    bg: "from-violet-500/25 to-cyan-500/20",
+    text: "text-violet-100",
+    glow: "shadow-violet-500/30",
+  },
+};
 
 const ACTIVE_SONG = SONG_EN001A;
 
@@ -59,6 +113,49 @@ function pitchToPercent(hz: number): number {
   return Math.max(0, Math.min(100, pct));
 }
 
+function isAgentIdentity(identity: string): boolean {
+  return identity.includes("agent") || identity.startsWith("agent-");
+}
+
+function groupTranscriptLines(
+  transcriptions: { text: string; participantInfo?: { identity?: string } }[]
+): TranscriptLine[] {
+  const lines: TranscriptLine[] = [];
+
+  for (let idx = 0; idx < transcriptions.length; idx++) {
+    const entry = transcriptions[idx];
+    const identity = entry.participantInfo?.identity ?? "";
+    const isAgent = isAgentIdentity(identity);
+    const text = entry.text.trim();
+    if (!text) continue;
+
+    const last = lines[lines.length - 1];
+    if (last && last.isAgent === isAgent) {
+      last.text = text;
+      last.key = `${last.key}-${idx}`;
+    } else {
+      lines.push({ isAgent, text, key: `${identity}-${idx}` });
+    }
+  }
+
+  return lines;
+}
+
+function useAgentAudioMute(muted: boolean) {
+  const participants = useRemoteParticipants();
+
+  useEffect(() => {
+    for (const participant of participants) {
+      participant.audioTrackPublications.forEach((pub) => {
+        const track = pub.track;
+        if (track instanceof RemoteAudioTrack) {
+          track.setVolume(muted ? 0 : 1);
+        }
+      });
+    }
+  }, [participants, muted]);
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -71,6 +168,9 @@ export default function VocalDashboard() {
 
   // ── Dashboard state ──────────────────────────────────────────────────
   const [coachingMode, setCoachingMode] = useState<"karaoke" | "conversational">("karaoke");
+  const [nonInterruptMode, setNonInterruptMode] = useState(true);
+  const [allowAgentSpeech, setAllowAgentSpeech] = useState(false);
+  const [visualCue, setVisualCue] = useState<VisualCue | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [coachNotes, setCoachNotes] = useState<string | null>(null);
   const [coachStatus, setCoachStatus] = useState<
@@ -81,12 +181,29 @@ export default function VocalDashboard() {
   const [displayMetrics, setDisplayMetrics] = useState<VocalMetrics>({
     volumeDb: -100,
     frequencyHz: 0,
+    pitchConfidence: 0,
+    clarity: 0,
+    isVoiced: false,
+    noteName: "—",
   });
   const [isVolumeWarn, setIsVolumeWarn] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
+  const [coachDemonstrating, setCoachDemonstrating] = useState(false);
+  const [demoNotes, setDemoNotes] = useState<string[]>([]);
+  const [demoActiveNote, setDemoActiveNote] = useState<string | null>(null);
+  const [demoInstrument, setDemoInstrument] = useState<DemoInstrument>("both");
+  const [instrumentFollowEnabled, setInstrumentFollowEnabled] = useState(false);
+  const [followInstrument, setFollowInstrument] = useState<DemoInstrument>("both");
 
   // Refs for interval / telemetry gating
-  const metricsRef = useRef<VocalMetrics>({ volumeDb: -100, frequencyHz: 0 });
+  const metricsRef = useRef<VocalMetrics>({
+    volumeDb: -100,
+    frequencyHz: 0,
+    pitchConfidence: 0,
+    clarity: 0,
+    isVoiced: false,
+    noteName: "—",
+  });
   const trackerRef = useRef({
     activeSyllableToken: null as string | null,
     expectedPitchHz: 0,
@@ -100,12 +217,50 @@ export default function VocalDashboard() {
   const lastAutoFaultRef = useRef(0);
   const coachingModeRef = useRef(coachingMode);
   coachingModeRef.current = coachingMode;
+  const nonInterruptModeRef = useRef(nonInterruptMode);
+  nonInterruptModeRef.current = nonInterruptMode;
+  const transcriptScrollRef = useRef<HTMLDivElement>(null);
+  const karaokeTranscriptScrollRef = useRef<HTMLDivElement>(null);
+  const visualCueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   isPausedRef.current = isPaused;
 
   // Smoothed display refs (updated every frame, flushed to state on an interval)
   const smoothedRef = useRef({ volumeDb: -100, frequencyHz: 0 });
   const lastPitchAtRef = useRef(0);
   const lastDisplayFlushRef = useRef(0);
+
+  const lastPlayRequestRef = useRef<string>("");
+  const lastPlayRequestAtRef = useRef(0);
+
+  const tonePlayer = useTonePlayer();
+  const tonePlayerRef = useRef(tonePlayer);
+  tonePlayerRef.current = tonePlayer;
+
+  const sendAnalysisSnapshot = useCallback(() => {
+    const sendFn = sendTelemetryRef.current;
+    if (!sendFn) return;
+    const m = metricsRef.current;
+    const t = trackerRef.current;
+    const packet = JSON.stringify({
+      type: "ANALYSIS_SNAPSHOT",
+      song_id: ACTIVE_SONG.id,
+      syllable: t.activeSyllableToken,
+      pitch_hz: m.frequencyHz,
+      expected_pitch_hz: t.expectedPitchHz || null,
+      pitch_delta_cents: t.pitchDeltaCents,
+      pitch_confidence: m.pitchConfidence,
+      clarity: m.clarity,
+      is_voiced: m.isVoiced,
+      note_name: m.noteName,
+      volume_db: m.volumeDb,
+      on_pitch: t.isOnPitch,
+    });
+    void sendFn(new TextEncoder().encode(packet), { reliable: true });
+  }, []);
+
+  const sendTelemetryRef = useRef<
+    ((payload: Uint8Array, options: DataPublishOptions) => Promise<void>) | null
+  >(null);
 
   // ── Data channel: send & receive ──────────────────────────────────────
   const onDataReceived = useCallback(
@@ -125,18 +280,124 @@ export default function VocalDashboard() {
           setCoachStatus("idle");
           setAlertMessage(null);
           setCoachNotes(notes ?? null);
+          setCoachDemonstrating(false);
         } else if (action === "SHOW_TIPS") {
           setCoachNotes(notes ?? null);
+        } else if (action === "SHOW_CUE") {
+          const cue = (parsed.cue as string) ?? "";
+          const tone = (parsed.tone as VisualCueTone) ?? "neutral";
+          if (cue) {
+            setVisualCue({ text: cue, tone });
+            if (visualCueTimerRef.current) clearTimeout(visualCueTimerRef.current);
+            visualCueTimerRef.current = setTimeout(() => {
+              setVisualCue(null);
+            }, VISUAL_CUE_FADE_MS);
+          }
+        } else if (action === "SHOW_NOTES") {
+          const rawNotes = parsed.notes as Array<{
+            note_name: string;
+            frequency_hz: number;
+            duration_ms?: number;
+          }>;
+          if (rawNotes?.length) {
+            const inst = (parsed.instrument as DemoInstrument) ?? "piano";
+            setDemoInstrument(inst);
+            setDemoNotes(rawNotes.map((n) => n.note_name));
+            setDemoActiveNote(rawNotes[0]?.note_name ?? null);
+            setCoachDemonstrating(true);
+            setCoachStatus("speaking");
+            setCoachNotes(
+              notes ?? `On the board: ${rawNotes.map((n) => n.note_name).join(", ")}`
+            );
+          }
+        } else if (action === "PLAY_REFERENCE_TONE") {
+          const hz = parsed.frequency_hz as number;
+          const durationMs = (parsed.duration_ms as number) ?? 1200;
+          const syllable = parsed.syllable as string | undefined;
+          const noteName =
+            (parsed.note_name as string) ||
+            (hz > 0 ? hzToNoteName(hz) : null) ||
+            "—";
+          if (!hz || hz <= 0) return;
+          const inst = (parsed.instrument as DemoInstrument) ?? "both";
+          setDemoInstrument(inst);
+          setDemoNotes(noteName !== "—" ? [noteName] : []);
+          setDemoActiveNote(noteName !== "—" ? noteName : null);
+          setCoachDemonstrating(true);
+          setCoachStatus("speaking");
+          setCoachNotes(
+            notes ?? `Reference tone: ${syllable ?? noteName} ${hz?.toFixed(0)} Hz`
+          );
+          void tonePlayerRef.current.playTone(hz, durationMs, inst).finally(() => {
+            setCoachDemonstrating(false);
+            setDemoActiveNote(null);
+            setDemoNotes([]);
+          });
+        } else if (action === "PLAY_NOTE_SEQUENCE") {
+          const rawNotes = parsed.notes as Array<{
+            note_name: string;
+            frequency_hz: number;
+            duration_ms?: number;
+          }>;
+          if (rawNotes?.length) {
+            const validNotes = rawNotes.filter((n) => n.frequency_hz > 0);
+            if (!validNotes.length) return;
+            const inst = (parsed.instrument as DemoInstrument) ?? "both";
+            setDemoInstrument(inst);
+            setDemoNotes(validNotes.map((n) => n.note_name));
+            setCoachDemonstrating(true);
+            setCoachStatus("speaking");
+            const label = validNotes.map((n) => n.note_name).join(" → ");
+            setCoachNotes(notes ?? `Playing: ${label}`);
+            const events = validNotes.map((n) => ({
+              frequencyHz: n.frequency_hz,
+              durationMs: n.duration_ms ?? 1200,
+              syllable: n.note_name,
+            }));
+            void tonePlayerRef.current
+              .playSequence(
+                events,
+                (_i, event) => {
+                  setDemoActiveNote(event.syllable ?? null);
+                },
+                inst
+              )
+              .finally(() => {
+                setCoachDemonstrating(false);
+                setDemoActiveNote(null);
+                setDemoNotes([]);
+              });
+          }
+        } else if (action === "PLAY_LYRIC_LINE") {
+          const lineIndex = parsed.line_index as number;
+          const group = ACTIVE_SONG.lineGroups[lineIndex];
+          if (group) {
+            setCoachDemonstrating(true);
+            setCoachStatus("speaking");
+            setCoachNotes(notes ?? `Playing: ${group.lyricText}`);
+            const events = group.syllables.map((s) => ({
+              frequencyHz: s.expectedHz,
+              durationMs: Math.max(300, Math.round((s.end - s.start) * 1000)),
+              syllable: s.token,
+            }));
+            void tonePlayerRef.current.playSequence(events).then(() => {
+              setCoachDemonstrating(false);
+            });
+          }
+        } else if (action === "REQUEST_ANALYSIS") {
+          setCoachNotes(notes ?? "Running detailed voice analysis…");
+          sendAnalysisSnapshot();
         }
       } catch {
         // Non-JSON payloads are silently ignored.
       }
     },
-    []
+    [sendAnalysisSnapshot]
   );
 
   const { send: sendData } = useDataChannel("session_control", onDataReceived);
   const { send: sendTelemetry } = useDataChannel("telemetry");
+  sendTelemetryRef.current = sendTelemetry;
 
   const songPlayback = useSongPlayback({
     src: ACTIVE_SONG.audioSrc,
@@ -180,6 +441,10 @@ export default function VocalDashboard() {
     setDisplayMetrics({
       volumeDb: displayVolume,
       frequencyHz: displayPitch,
+      pitchConfidence: m.pitchConfidence,
+      clarity: m.clarity,
+      isVoiced: m.isVoiced,
+      noteName: m.noteName,
     });
 
     setIsVolumeWarn((prev) => {
@@ -218,7 +483,14 @@ export default function VocalDashboard() {
     smoothedRef.current = { volumeDb: -100, frequencyHz: 0 };
     lastPitchAtRef.current = 0;
     lastDisplayFlushRef.current = 0;
-    setDisplayMetrics({ volumeDb: -100, frequencyHz: 0 });
+    setDisplayMetrics({
+      volumeDb: -100,
+      frequencyHz: 0,
+      pitchConfidence: 0,
+      clarity: 0,
+      isVoiced: false,
+      noteName: "—",
+    });
     setIsVolumeWarn(false);
   }, [isActive]);
 
@@ -283,6 +555,71 @@ export default function VocalDashboard() {
 
   // ── Real-time Transcription Stream ────────────────────────────────────
   const transcriptions = useTranscriptions();
+  const transcriptLines = useMemo(
+    () => groupTranscriptLines(transcriptions),
+    [transcriptions]
+  );
+  const studentLines = useMemo(
+    () => transcriptLines.filter((line) => !line.isAgent),
+    [transcriptLines]
+  );
+  const latestStudentText = studentLines.at(-1)?.text ?? "";
+
+  const agentAudioMuted =
+    coachingMode === "conversational" &&
+    nonInterruptMode &&
+    !allowAgentSpeech;
+  useAgentAudioMute(agentAudioMuted);
+
+  // Detect "play G3 on piano" in student speech → direct backend execution
+  useEffect(() => {
+    if (!isConnected || !isActive || !latestStudentText) return;
+
+    const request = parsePlayRequest(latestStudentText);
+    if (!request) return;
+
+    const key = playRequestKey(request);
+    const now = Date.now();
+    if (
+      key === lastPlayRequestRef.current &&
+      now - lastPlayRequestAtRef.current < 4000
+    ) {
+      return;
+    }
+    lastPlayRequestRef.current = key;
+    lastPlayRequestAtRef.current = now;
+
+    const sendFn = sendTelemetryRef.current;
+    if (!sendFn) return;
+
+    const packet = JSON.stringify({
+      type: "USER_PLAY_REQUEST",
+      pitch: request.pitch,
+      instrument: request.instrument,
+    });
+    void sendFn(new TextEncoder().encode(packet), { reliable: true });
+  }, [latestStudentText, isConnected, isActive]);
+
+  useEffect(() => {
+    const scrollContainerToBottom = (container: HTMLDivElement | null) => {
+      if (!container) return;
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      // Only scroll the transcript panel — never the page — and only if already near bottom.
+      if (distanceFromBottom < 80) {
+        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+      }
+    };
+
+    scrollContainerToBottom(transcriptScrollRef.current);
+    scrollContainerToBottom(karaokeTranscriptScrollRef.current);
+  }, [transcriptLines]);
+
+  useEffect(() => {
+    return () => {
+      if (visualCueTimerRef.current) clearTimeout(visualCueTimerRef.current);
+    };
+  }, []);
 
   // ── Telemetry dispatch interval ───────────────────────────────────────
   useEffect(() => {
@@ -304,6 +641,10 @@ export default function VocalDashboard() {
         expected_pitch_hz: t.expectedPitchHz || null,
         pitch_delta_cents: t.pitchDeltaCents,
         on_pitch: t.isOnPitch,
+        pitch_confidence: m.pitchConfidence,
+        clarity: m.clarity,
+        is_voiced: m.isVoiced,
+        note_name: m.noteName,
       });
 
       sendTelemetry(new TextEncoder().encode(packet), { reliable: false });
@@ -363,6 +704,62 @@ export default function VocalDashboard() {
     sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
   }, [coachingMode, isConnected, sendTelemetry]);
 
+  useEffect(() => {
+    if (!isConnected) return;
+    const packet = JSON.stringify({
+      type: "NON_INTERRUPT_MODE",
+      enabled: nonInterruptMode,
+    });
+    sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+  }, [nonInterruptMode, isConnected, sendTelemetry]);
+
+  useEffect(() => {
+    if (!isConnected) return;
+    const packet = JSON.stringify({
+      type: "INSTRUMENT_FOLLOW",
+      enabled: instrumentFollowEnabled,
+      instrument: followInstrument,
+    });
+    sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+  }, [instrumentFollowEnabled, followInstrument, isConnected, sendTelemetry]);
+
+  useEffect(() => {
+    tonePlayer.setInstrumentFollow(
+      instrumentFollowEnabled && isActive && !coachDemonstrating,
+      followInstrument
+    );
+  }, [
+    instrumentFollowEnabled,
+    followInstrument,
+    isActive,
+    coachDemonstrating,
+    tonePlayer,
+  ]);
+
+  useEffect(() => {
+    if (!instrumentFollowEnabled || !isActive || coachDemonstrating) return;
+    tonePlayer.updateInstrumentFollow(
+      displayMetrics.frequencyHz,
+      displayMetrics.isVoiced,
+      displayMetrics.pitchConfidence
+    );
+  }, [
+    displayMetrics,
+    instrumentFollowEnabled,
+    isActive,
+    coachDemonstrating,
+    tonePlayer,
+  ]);
+
+  useEffect(() => {
+    if (coachingMode === "conversational") {
+      setNonInterruptMode(true);
+    } else {
+      setAllowAgentSpeech(false);
+      setVisualCue(null);
+    }
+  }, [coachingMode]);
+
   // ── Lyric timer synced to reference audio (karaoke) or wall clock ─────
   const sessionStartRef = useRef<number>(0);
 
@@ -407,6 +804,12 @@ export default function VocalDashboard() {
       : 0;
   const pitchDeltaCents =
     coachingMode === "karaoke" ? syllableTracker.pitchDeltaCents : 0;
+  const liveNote =
+    displayMetrics.isVoiced && displayMetrics.noteName !== "—"
+      ? displayMetrics.noteName
+      : null;
+  const targetNote =
+    targetPitchHz > 0 ? hzToNoteName(targetPitchHz) : null;
 
   const sendCriticalError = useCallback(
     (
@@ -462,6 +865,7 @@ export default function VocalDashboard() {
   // ── Request Feedback ─────────────────────────────────────────────────
   const requestFeedback = useCallback(() => {
     if (!isConnected) return;
+    setAllowAgentSpeech(true);
     const packet = JSON.stringify({ type: "REQUEST_FEEDBACK" });
     sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
   }, [isConnected, sendTelemetry]);
@@ -472,9 +876,13 @@ export default function VocalDashboard() {
       await localParticipant.setMicrophoneEnabled(false);
       songPlayback.stop();
       stop();
+      tonePlayer.setInstrumentFollow(false);
+      setInstrumentFollowEnabled(false);
       setSessionElapsed(0);
       sentSyllableResultsRef.current = 0;
       setMicError(null);
+      setAllowAgentSpeech(false);
+      setVisualCue(null);
       return;
     }
 
@@ -498,7 +906,7 @@ export default function VocalDashboard() {
         err instanceof Error ? err.message : "Failed to start microphone."
       );
     }
-  }, [isActive, songPlayback, stop, localParticipant, start, coachingMode]);
+  }, [isActive, songPlayback, stop, tonePlayer, localParticipant, start, coachingMode]);
 
   // Start/stop reference audio when coaching mode changes mid-session
   useEffect(() => {
@@ -647,22 +1055,125 @@ export default function VocalDashboard() {
               <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
                 <Radio className="h-4 w-4 text-cyan-400 animate-pulse" />
                 <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                  Conversational Free Talk Mode
+                  Conversational Mode
                 </h2>
+                {nonInterruptMode && (
+                  <span className="ml-2 rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
+                    Silent cues
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNonInterruptMode((prev) => !prev);
+                    setAllowAgentSpeech(false);
+                  }}
+                  disabled={!isConnected}
+                  className={`ml-auto flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition disabled:opacity-40 ${
+                    nonInterruptMode
+                      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
+                      : "border-white/10 bg-white/5 text-[var(--color-text-muted)] hover:text-white"
+                  }`}
+                >
+                  {nonInterruptMode ? (
+                    <>
+                      <EyeOff className="h-3 w-3" />
+                      Non-Interrupt
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="h-3 w-3" />
+                      Verbal Coach
+                    </>
+                  )}
+                </button>
               </div>
-              <div className="flex flex-col items-center justify-center px-6 py-10 text-center">
-                <p className="max-w-md text-sm text-[var(--color-text-secondary)] leading-relaxed">
-                  You are in free-talk mode. Speak, sing, or chat with the AI vocal coach.
-                  Your speech will be transcribed and evaluated in real time.
-                </p>
-                <div className="mt-6 flex flex-wrap gap-3 justify-center">
+
+              {/* Big visual coaching cue */}
+              <div className="relative flex min-h-[140px] items-center justify-center border-b border-[var(--color-border-subtle)] bg-[#0a0a0f]/60 px-6 py-8">
+                {visualCue ? (
+                  <p
+                    key={visualCue.text}
+                    className={`visual-cue-pop text-center text-4xl font-black tracking-tight sm:text-5xl ${
+                      VISUAL_CUE_STYLES[visualCue.tone].text
+                    }`}
+                  >
+                    {visualCue.text}
+                  </p>
+                ) : (
+                  <p className="text-center text-sm text-[var(--color-text-muted)]">
+                    {nonInterruptMode
+                      ? "Coach cues appear here — no voice interruptions while you sing."
+                      : "Coach will respond with voice and on-screen tips."}
+                  </p>
+                )}
+                {visualCue && (
+                  <div
+                    className={`pointer-events-none absolute inset-4 rounded-2xl bg-gradient-to-br opacity-40 blur-2xl ${
+                      VISUAL_CUE_STYLES[visualCue.tone].bg
+                    }`}
+                  />
+                )}
+              </div>
+
+              {/* Live transcript */}
+              <div className="flex flex-col gap-3 px-5 py-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+                    Live Transcript
+                  </h3>
+                  {isActive && latestStudentText && (
+                    <span className="text-[10px] text-emerald-400/80">Listening…</span>
+                  )}
+                </div>
+
+                {latestStudentText && (
+                  <p className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-4 py-3 text-lg font-medium leading-snug text-white">
+                    {latestStudentText}
+                  </p>
+                )}
+
+                <div
+                  ref={transcriptScrollRef}
+                  className="flex max-h-[180px] flex-col gap-2 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800"
+                >
+                  {transcriptLines.length === 0 ? (
+                    <p className="text-sm italic text-[var(--color-text-muted)]">
+                      {isActive
+                        ? "Start singing or speaking — your words appear here in real time."
+                        : "Start a session to begin live transcription."}
+                    </p>
+                  ) : (
+                    transcriptLines.map((line) => (
+                      <div
+                        key={line.key}
+                        className={`rounded-lg px-3 py-2 text-sm leading-relaxed ${
+                          line.isAgent
+                            ? "bg-cyan-500/5 text-[var(--color-text-muted)]"
+                            : "bg-white/5 text-[var(--color-text-secondary)]"
+                        }`}
+                      >
+                        <span
+                          className={`mb-0.5 block text-[10px] font-bold uppercase tracking-wider ${
+                            line.isAgent ? "text-cyan-400/70" : "text-violet-400/80"
+                          }`}
+                        >
+                          {line.isAgent ? "Coach" : "You"}
+                        </span>
+                        {line.text}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-3 pt-1">
                   <button
                     disabled={!isConnected || !isActive}
                     onClick={requestFeedback}
-                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-emerald-500/20 transition hover:shadow-xl hover:shadow-emerald-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-emerald-500/20 transition hover:shadow-xl hover:shadow-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Play className="h-4 w-4 fill-white" />
-                    Stop Performance &amp; Get Feedback
+                    Stop &amp; Get Spoken Feedback
                   </button>
                 </div>
               </div>
@@ -752,14 +1263,17 @@ export default function VocalDashboard() {
                 ) : (
                   <p className="text-sm italic text-[var(--color-text-muted)]">
                     {isActive
-                      ? "Listening… The coach will chime in when it has feedback."
+                      ? coachingMode === "conversational" && nonInterruptMode
+                        ? "Silent mode — glance at the big cue above while you sing."
+                        : "Listening… The coach will chime in when it has feedback."
                       : "Start a session to receive live coaching."}
                   </p>
                 )}
               </div>
             </section>
 
-            {/* Real-time Transcription Stream */}
+            {/* Real-time Transcription Stream — karaoke only (conversational has its own panel) */}
+            {coachingMode === "karaoke" && (
             <section className="glass-card overflow-hidden">
               <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
                 <Radio className="h-4 w-4 text-fuchsia-400 animate-pulse" />
@@ -767,33 +1281,113 @@ export default function VocalDashboard() {
                   Live Transcription Stream
                 </h2>
               </div>
-              <div className="flex flex-col gap-2 max-h-[120px] overflow-y-auto px-5 py-4 scrollbar-thin scrollbar-thumb-zinc-800">
-                {transcriptions.length === 0 ? (
+              <div
+                ref={karaokeTranscriptScrollRef}
+                className="flex max-h-[120px] flex-col gap-2 overflow-y-auto px-5 py-4 scrollbar-thin scrollbar-thumb-zinc-800"
+              >
+                {transcriptLines.length === 0 ? (
                   <p className="text-sm italic text-[var(--color-text-muted)]">
                     No speech detected yet.
                   </p>
                 ) : (
-                  transcriptions.map((t, idx) => {
-                    const identity = t.participantInfo?.identity ?? "";
-                    const isAgent =
-                      identity.includes("agent") || identity.startsWith("agent-");
-                    return (
-                      <div key={idx} className="flex flex-col gap-0.5 text-xs">
-                        <span className={`font-semibold ${isAgent ? "text-cyan-400" : "text-violet-400"}`}>
-                          {isAgent ? "Coach" : "Student"}:
-                        </span>
-                        <p className="text-[var(--color-text-secondary)] leading-relaxed">{t.text}</p>
-                      </div>
-                    );
-                  })
+                  transcriptLines.map((line) => (
+                    <div key={line.key} className="flex flex-col gap-0.5 text-xs">
+                      <span
+                        className={`font-semibold ${
+                          line.isAgent ? "text-cyan-400" : "text-violet-400"
+                        }`}
+                      >
+                        {line.isAgent ? "Coach" : "Student"}:
+                      </span>
+                      <p className="text-[var(--color-text-secondary)] leading-relaxed">
+                        {line.text}
+                      </p>
+                    </div>
+                  ))
                 )}
               </div>
             </section>
+            )}
           </div>
         </div>
 
         {/* ── Right column: Telemetry + Controls ──────────────────────── */}
         <div className="flex flex-col gap-6">
+          <LiveSoundEnergy
+            metrics={displayMetrics}
+            targetNote={targetNote}
+            isActive={isActive}
+          />
+
+          <InstrumentNoteBoard
+            liveNote={liveNote}
+            targetNote={targetNote}
+            demoNotes={demoNotes}
+            demoActiveNote={demoActiveNote}
+            instrument={
+              instrumentFollowEnabled ? followInstrument : demoInstrument
+            }
+            coachDemonstrating={coachDemonstrating}
+          />
+
+          {/* Instrument follow toggle */}
+          <section className="glass-card overflow-hidden">
+            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+              <Guitar className="h-4 w-4 text-amber-400" />
+              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                Instrument Mirror
+              </h2>
+              <button
+                type="button"
+                disabled={!isActive}
+                onClick={() => setInstrumentFollowEnabled((v) => !v)}
+                className={`ml-auto rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-40 ${
+                  instrumentFollowEnabled
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : "bg-white/5 text-[var(--color-text-muted)] border border-white/10"
+                }`}
+              >
+                {instrumentFollowEnabled ? "On" : "Off"}
+              </button>
+            </div>
+            <div className="space-y-3 px-5 py-4">
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Mirror your sung pitch as live piano/guitar simulation. Turn on
+                before singing — coach samples also use this sound.
+              </p>
+              <div className="flex rounded-full bg-white/5 p-0.5 border border-white/5">
+                {(
+                  [
+                    ["piano", "Piano", Piano],
+                    ["guitar", "Guitar", Guitar],
+                    ["both", "Both", Music],
+                  ] as const
+                ).map(([id, label, Icon]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    disabled={!isActive}
+                    onClick={() => setFollowInstrument(id)}
+                    className={`flex flex-1 items-center justify-center gap-1 rounded-full px-2 py-1.5 text-[10px] font-semibold transition disabled:opacity-40 ${
+                      followInstrument === id
+                        ? "bg-violet-600 text-white"
+                        : "text-[var(--color-text-muted)]"
+                    }`}
+                  >
+                    <Icon className="h-3 w-3" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {instrumentFollowEnabled && isActive && displayMetrics.isVoiced && (
+                <p className="text-center text-xs text-cyan-400">
+                  Mirroring {displayMetrics.noteName.replace("#", "♯")} on{" "}
+                  {followInstrument}
+                </p>
+              )}
+            </div>
+          </section>
+
           {/* Volume gauge */}
           <section className="glass-card overflow-hidden">
             <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
@@ -829,7 +1423,7 @@ export default function VocalDashboard() {
               </h2>
               <span className="ml-auto font-mono text-xs text-[var(--color-text-muted)]">
                 {displayMetrics.frequencyHz > 0
-                  ? `${displayMetrics.frequencyHz.toFixed(1)} Hz`
+                  ? `${displayMetrics.noteName} · ${displayMetrics.frequencyHz.toFixed(1)} Hz`
                   : "—"}
               </span>
             </div>
@@ -859,6 +1453,31 @@ export default function VocalDashboard() {
                   </span>
                 )}
               </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-lg bg-white/5 px-2 py-1.5">
+                  <p className="text-[var(--color-text-muted)]">Confidence</p>
+                  <p className={`font-mono font-semibold ${displayMetrics.pitchConfidence > 0.5 ? "text-emerald-400" : "text-zinc-400"}`}>
+                    {(displayMetrics.pitchConfidence * 100).toFixed(0)}%
+                  </p>
+                </div>
+                <div className="rounded-lg bg-white/5 px-2 py-1.5">
+                  <p className="text-[var(--color-text-muted)]">Clarity</p>
+                  <p className={`font-mono font-semibold ${displayMetrics.clarity > 0.3 ? "text-cyan-400" : "text-zinc-400"}`}>
+                    {(displayMetrics.clarity * 100).toFixed(0)}%
+                  </p>
+                </div>
+                <div className="rounded-lg bg-white/5 px-2 py-1.5">
+                  <p className="text-[var(--color-text-muted)]">Voiced</p>
+                  <p className={`font-semibold ${displayMetrics.isVoiced ? "text-emerald-400" : "text-zinc-500"}`}>
+                    {displayMetrics.isVoiced ? "Yes" : "No"}
+                  </p>
+                </div>
+              </div>
+              {coachDemonstrating && (
+                <p className="mt-2 flex items-center gap-1 text-xs text-violet-400">
+                  <Music className="h-3 w-3" /> Coach playing reference tones…
+                </p>
+              )}
             </div>
           </section>
 
