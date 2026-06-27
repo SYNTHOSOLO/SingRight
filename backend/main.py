@@ -127,6 +127,121 @@ def hz_to_note_name(hz: float) -> str:
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
+_CHORD_INTERVALS: dict[str, list[int]] = {
+    "MAJ": [0, 4, 7],
+    "MIN": [0, 3, 7],
+    "DIM": [0, 3, 6],
+    "AUG": [0, 4, 8],
+    "7": [0, 4, 7, 10],
+    "MAJ7": [0, 4, 7, 11],
+    "MIN7": [0, 3, 7, 10],
+}
+
+SESSION_STATE_MARKER = "[SESSION STATE]"
+
+AUDIO_CAPABILITY_BLOCK = (
+    "BUILT-IN AUDIO (always available): You play real piano/guitar samples in the "
+    "student's browser and highlight keys on the Note Board. Tools: teach_pitch "
+    "(notes/scales), play_note (single note), play_chord (C, Dm, G7, etc.), "
+    "demonstrate_notes (sequences), show_notes_on_piano (visual only), "
+    "play_reference_tone, demonstrate_syllable, sing_lyric_line. "
+    "When teaching or explaining pitch, CALL A TOOL FIRST — then talk. "
+    "NEVER say you cannot play audio, are text-only, or lack an instrument."
+)
+
+MAX_CHAT_ITEMS = 48
+
+
+def _message_text(item: Any) -> str:
+    content = getattr(item, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text", "")))
+            else:
+                parts.append(str(part))
+        return " ".join(parts)
+    return str(content)
+
+
+def _strip_system_messages_with_markers(
+    chat_ctx: llm.ChatContext, markers: tuple[str, ...]
+) -> None:
+    chat_ctx.items = [
+        item
+        for item in chat_ctx.items
+        if not (
+            getattr(item, "type", None) == "message"
+            and getattr(item, "role", None) == "system"
+            and any(_message_text(item).startswith(marker) for marker in markers)
+        )
+    ]
+
+
+async def _commit_chat_ctx(agent: Agent, chat_ctx: llm.ChatContext) -> None:
+    chat_ctx.truncate(max_items=MAX_CHAT_ITEMS)
+    await agent.update_chat_ctx(chat_ctx)
+
+
+def parse_chord_name(chord: str, default_octave: int = 4) -> list[str]:
+    """Parse chord names like C, Dm, F#maj7, Bb into note names."""
+    normalized = (
+        chord.strip()
+        .upper()
+        .replace("MAJOR", "MAJ")
+        .replace("MINOR", "MIN")
+        .replace("♯", "#")
+        .replace("♭", "B")
+    )
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = re.sub(r"CHORD$", "", normalized)
+
+    quality = "MAJ"
+    root_name = normalized
+    quality_match = re.match(
+        r"^([A-G](?:#|B)?)(MAJ7|MIN7|MAJ|MIN|DIM|AUG|7)$",
+        normalized,
+    )
+    if quality_match:
+        root_name = quality_match.group(1)
+        quality = quality_match.group(2)
+    elif re.match(r"^([A-G](?:#|B)?)M$", normalized):
+        root_name = normalized[:-1]
+        quality = "MIN"
+
+    intervals = _CHORD_INTERVALS.get(quality)
+    if intervals is None:
+        raise ValueError(f"Invalid chord name: {chord!r}")
+
+    root_semitone, _ = parse_note_name(root_name, default_octave)
+    root_midi = (default_octave + 1) * 12 + root_semitone
+    return [
+        f"{_NOTE_NAMES[(root_midi + interval) % 12]}{(root_midi + interval) // 12 - 1}"
+        for interval in intervals
+    ]
+
+
+def try_parse_chord_or_notes(value: str, default_octave: int = 4) -> list[str] | None:
+    """Return note names if value looks like a chord; None otherwise."""
+    raw = value.strip()
+    if not raw:
+        return None
+    if re.search(r"chord", raw, re.IGNORECASE) or re.match(
+        r"^[A-G](?:#|b|♯|♭)?(?:maj7|min7|maj|min|dim|aug|m7|7|m)?$",
+        raw.strip(),
+        re.IGNORECASE,
+    ):
+        chord_token = re.sub(r".*?\b([A-G](?:#|b|♯|♭)?(?:maj7|min7|maj|min|dim|aug|m7|7|m)?)\b.*", r"\1", raw, flags=re.IGNORECASE)
+        try:
+            return parse_chord_name(chord_token, default_octave)
+        except ValueError:
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Vocal Coach Agent
 # ---------------------------------------------------------------------------
@@ -145,13 +260,13 @@ class VocalCoachAgent(Agent):
     """
 
     SYSTEM_INSTRUCTIONS = (
-        "You are an expert AI vocal coach conducting a live singing lesson. "
-        "AUDIO CAPABILITIES (CRITICAL): You CAN play piano and guitar samples "
-        "through the student's speakers and highlight notes on the on-screen "
-        "keyboard. Use `teach_pitch`, `play_note`, or `show_notes_on_piano`. "
-        "NEVER say you cannot play sounds, cannot play piano, are text-only, "
-        "or that the student must use an external instrument — you have built-in "
-        "audio playback.\n"
+        "You are an expert AI vocal coach conducting a live singing lesson.\n\n"
+        f"{AUDIO_CAPABILITY_BLOCK}\n\n"
+        "Examples you MUST use tools for:\n"
+        "- 'What does G3 sound like?' → call teach_pitch('G3')\n"
+        "- 'Play a C chord' → call play_chord('C')\n"
+        "- 'Show me the notes in Dm' → call show_notes_on_piano('D,F,A') or play_chord('Dm')\n"
+        "- 'Play C,E,G' scale → call teach_pitch('C4,E4,G4')\n\n"
         "You listen to the student's voice in real time and receive continuous "
         "vocal telemetry (volume in dB, pitch in Hz, and syllable-level accuracy "
         "when they are singing a notated song). "
@@ -171,11 +286,11 @@ class VocalCoachAgent(Agent):
         "that syllable yourself so the student can mimic you.\n"
         "6. Use `sing_lyric_line` to play and sing an entire lyric line with "
         "correct pitches — great for teaching a phrase by example.\n"
-        "7. TEACHING PITCHES — when the student asks to play, hear, or see a note, "
-        "pitch, or sound, you MUST call `teach_pitch` IMMEDIATELY. NEVER guess Hz or "
-        "note names in speech (G3 ≈ 196 Hz, NOT B3). Never describe a note without "
-        "playing/showing it. The client may send USER_PLAY_REQUEST — do not contradict "
-        "that note.\n"
+        "7. TEACHING PITCHES & CHORDS — when the student asks to play, hear, or "
+        "see a note, chord, pitch, or sound, you MUST call teach_pitch, play_note, "
+        "or play_chord IMMEDIATELY. NEVER guess Hz or note names in speech without "
+        "playing/showing first. The client may send USER_PLAY_REQUEST — confirm "
+        "playback; do not contradict it.\n"
         "8. When INSTRUMENT FOLLOW is ON, the student's pitch is mirrored live "
         "as piano/guitar in their browser — use the same instrument setting for demos.\n"
         "9. Use `request_detailed_analysis` when you need precise pitch "
@@ -286,7 +401,12 @@ class VocalCoachAgent(Agent):
             session.interrupt()
 
         try:
-            if "," in pitch:
+            chord_names = try_parse_chord_or_notes(pitch)
+            if chord_names:
+                notes_payload = build_notes_payload(chord_names, seconds_per_note=0.9)
+                note_name = ", ".join(chord_names)
+                hz = note_to_hz(chord_names[0])
+            elif "," in pitch:
                 names = parse_note_list(pitch)
                 notes_payload = build_notes_payload(names)
                 note_name, hz = names[0], note_to_hz(names[0])
@@ -307,7 +427,7 @@ class VocalCoachAgent(Agent):
             invite_to_sing=True,
         )
 
-        chat_ctx = self.chat_ctx.copy()
+        chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(
             role="system",
             content=(
@@ -317,15 +437,15 @@ class VocalCoachAgent(Agent):
                 "cannot play piano or that audio is unavailable."
             ),
         )
-        await self.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(self, chat_ctx)
         logger.info("USER_PLAY_REQUEST fulfilled: %s on %s", note_name, inst)
 
     @llm.function_tool(
         description=(
             "Control the student's session playback and display coaching tips "
-            "in their UI. Use action PAUSE_TRACK to stop the backing track, "
-            "RESUME_TRACK to restart it, or SHOW_TIPS to display guidance "
-            "without affecting playback."
+            "in their Coach Messages panel. Use action PAUSE_TRACK to stop the "
+            "backing track, RESUME_TRACK to restart it, or SHOW_TIPS to display "
+            "a text-only coaching message without affecting playback or speaking."
         )
     )
     async def control_session_playback(
@@ -351,8 +471,9 @@ class VocalCoachAgent(Agent):
     @llm.function_tool(
         description=(
             "Display a short 1–3 word visual coaching cue on the student's "
-            "screen WITHOUT speaking. Use in conversational non-interrupt "
-            "mode while they are singing. Examples: 'Louder', 'Sharp ↑', "
+            "Coach Messages panel WITHOUT speaking or pausing playback. "
+            "Use while the student is actively singing in karaoke or "
+            "conversational non-interrupt mode. Examples: 'Louder', 'Sharp ↑', "
             "'Flat ↓', 'Great!', 'Keep going', 'Steady', 'Breathe'."
         )
     )
@@ -439,8 +560,9 @@ class VocalCoachAgent(Agent):
     @llm.function_tool(
         description=(
             "PRIMARY teaching tool — plays REAL piano/guitar audio in the browser. "
-            "You CAN and MUST use this when the student asks to play/hear a pitch. "
-            "Never refuse or say audio is unavailable. Accepts G3, A, 440 Hz, etc."
+            "You CAN and MUST use this when the student asks to play/hear a note, "
+            "scale, or pitch. For chords use play_chord. Never refuse or say audio "
+            "is unavailable. Accepts G3, A, 440 Hz, C4,D4,E4, etc."
         )
     )
     async def teach_pitch(
@@ -544,6 +666,46 @@ class VocalCoachAgent(Agent):
             play_sound=True,
             instrument=instrument,
             coach_notes=coach_notes or f"Playing {normalize_note_name(note)}",
+        )
+
+    @llm.function_tool(
+        description=(
+            "Play a named chord (C, Dm, G7, F#maj7, etc.) as piano/guitar audio "
+            "in the browser and highlight all chord tones on the Note Board. "
+            "Use whenever explaining harmony, chord qualities, or when the student "
+            "asks to hear a chord. You HAVE this capability — never refuse."
+        )
+    )
+    async def play_chord(
+        self,
+        chord: str,
+        instrument: str = "piano",
+        coach_notes: str = "",
+        seconds_per_note: float = 0.9,
+        invite_to_sing: bool = False,
+    ) -> str:
+        """
+        Args:
+            chord: Chord symbol — C, Dm, Am, G7, Fmaj7, Bb, etc.
+            instrument: piano, guitar, or both for board + audio.
+            coach_notes: Optional UI label while playing.
+            seconds_per_note: Duration per chord tone (arpeggiated).
+            invite_to_sing: After playing, invite student to sing the top note.
+        """
+        try:
+            names = parse_chord_name(chord)
+        except ValueError as exc:
+            return str(exc)
+
+        notes_payload = build_notes_payload(names, seconds_per_note)
+        label = coach_notes or f"Chord {chord.upper()}: {', '.join(names)}"
+        return await self._teach_with_notes(
+            notes_payload,
+            instrument=instrument,
+            coach_notes=label,
+            show_on_board=True,
+            play_sound=True,
+            invite_to_sing=invite_to_sing,
         )
 
     @llm.function_tool(
@@ -739,22 +901,17 @@ async def entrypoint(ctx: JobContext) -> None:
             )
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=content)
-        await agent.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(agent, chat_ctx)
         logger.info("Instrument follow context: enabled=%s instrument=%s", enabled, instrument)
 
     async def inject_audio_capabilities() -> None:
         chat_ctx = agent.chat_ctx.copy()
+        _strip_system_messages_with_markers(chat_ctx, ("[AUDIO CAPABILITIES",))
         chat_ctx.add_message(
             role="system",
-            content=(
-                "[AUDIO CAPABILITIES ACTIVE]\n"
-                "This app plays piano and guitar samples through the student's "
-                "speakers and shows notes on the keyboard. Tools: teach_pitch, "
-                "play_note, show_notes_on_piano. USER_PLAY_REQUEST auto-plays when "
-                "they ask. NEVER claim you cannot play audio."
-            ),
+            content=f"[AUDIO CAPABILITIES ACTIVE]\n{AUDIO_CAPABILITY_BLOCK}",
         )
-        await agent.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(agent, chat_ctx)
 
     async def inject_coaching_mode_context(mode: str, non_interrupt: bool) -> None:
         if mode == "conversational" and non_interrupt:
@@ -769,9 +926,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 "4. Use tone 'positive' for praise, 'corrective' for fixes, 'neutral' otherwise.\n"
                 "5. React to LIVE TELEMETRY: low volume → 'Louder'; good pitch → 'Great!' "
                 "or 'Keep going'; off pitch → 'Sharp ↑' or 'Flat ↓'.\n"
-                "6. When the student asks to play/hear/show a pitch, note, or sound, "
-                "you MUST call `teach_pitch` or `show_notes_on_piano`. NEVER say you "
-                "cannot play piano or audio — you CAN via tools. Play/show FIRST.\n"
+                "6. When the student asks to play/hear/show a pitch, note, chord, or sound, "
+                "you MUST call `teach_pitch`, `play_chord`, or `show_notes_on_piano`. "
+                "NEVER say you cannot play piano or audio — you CAN via tools. "
+                "Play/show FIRST, then explain.\n"
                 "7. When the student requests feedback (REQUEST_FEEDBACK), you MAY speak "
                 "in full sentences with a detailed critique.\n"
                 "8. Do NOT pause playback, play reference tones, or demonstrate unless asked."
@@ -779,17 +937,27 @@ async def entrypoint(ctx: JobContext) -> None:
         elif mode == "conversational":
             content = (
                 "[CONVERSATIONAL MODE ACTIVE]\n"
-                "Free-talk mode with no backing track. You may speak normally for coaching."
+                "Free-talk mode with no backing track. You may speak normally for coaching.\n"
+                f"{AUDIO_CAPABILITY_BLOCK}"
             )
         else:
             content = (
                 "[KARAOKE MODE ACTIVE]\n"
-                "Backing track and syllable-level pitch tracking are enabled."
+                "Backing track and syllable-level pitch tracking are enabled.\n"
+                f"{AUDIO_CAPABILITY_BLOCK}\n"
+                "SILENT COACHING (preferred while student is singing):\n"
+                "1. Use `show_visual_cue` for short 1–3 word cues (e.g. 'Louder', "
+                "'Sharp ↑', 'Flat ↓', 'Great!', 'Steady') — shown in Coach Messages.\n"
+                "2. Use `control_session_playback` with action SHOW_TIPS for longer "
+                "text tips WITHOUT pausing the track or speaking.\n"
+                "3. Only use PAUSE_TRACK + spoken correction for serious issues "
+                "that require stopping the student.\n"
+                "4. React to syllable results and live telemetry with silent cues first."
             )
 
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=content)
-        await agent.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(agent, chat_ctx)
         logger.info("Coaching context injected: mode=%s non_interrupt=%s", mode, non_interrupt)
 
     async def inject_song_context(song: dict) -> None:
@@ -805,7 +973,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=song_context)
-        await agent.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(agent, chat_ctx)
         logger.info("Song context set: %s", songname)
 
     async def inject_syllable_result(result: dict) -> None:
@@ -827,7 +995,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=note)
-        await agent.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(agent, chat_ctx)
 
     async def inject_telemetry(metrics: dict) -> None:
         nonlocal last_telemetry_at
@@ -849,7 +1017,7 @@ async def entrypoint(ctx: JobContext) -> None:
             on_pitch = metrics.get("on_pitch")
 
             parts = [
-                f"[LIVE TELEMETRY — {mode} mode]",
+                f"Telemetry ({mode} mode)",
                 f"Volume: {volume_db:.1f} dB, Pitch: {pitch_hz:.1f} Hz",
             ]
             if syllable:
@@ -874,10 +1042,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 parts.append(f"Voiced: {is_voiced}")
 
             telemetry_context = ". ".join(parts) + "."
+            state_content = (
+                f"{SESSION_STATE_MARKER}\n"
+                f"{telemetry_context}\n"
+                f"{AUDIO_CAPABILITY_BLOCK}"
+            )
 
             chat_ctx = agent.chat_ctx.copy()
-            chat_ctx.add_message(role="system", content=telemetry_context)
-            await agent.update_chat_ctx(chat_ctx)
+            _strip_system_messages_with_markers(
+                chat_ctx, (SESSION_STATE_MARKER, "[LIVE TELEMETRY")
+            )
+            chat_ctx.add_message(role="system", content=state_content)
+            await _commit_chat_ctx(agent, chat_ctx)
 
             last_telemetry_at = now
             logger.debug("Injected telemetry: %s", telemetry_context)
@@ -900,7 +1076,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=". ".join(parts) + ".")
-        await agent.update_chat_ctx(chat_ctx)
+        await _commit_chat_ctx(agent, chat_ctx)
         logger.info("Injected analysis snapshot")
 
     @ctx.room.on("data_received")
@@ -987,10 +1163,10 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.generate_reply(
         instructions=(
             "Greet the student warmly. Introduce yourself as their AI vocal "
-            "coach. You CAN play piano and guitar note samples on their speakers "
-            "and highlight keys on the Note Board — ask them to try 'play G3 on "
-            "piano'. You monitor pitch during karaoke. Ask them to press Start "
-            "Session when ready."
+            "coach. You CAN play piano and guitar notes and chords on their "
+            "speakers and highlight keys on the Note Board — invite them to try "
+            "'play G3 on piano' or 'play a C chord'. You monitor pitch during "
+            "karaoke. Ask them to press Start Session when ready."
         )
     )
     logger.info("Agent session started for participant %s", participant.identity)

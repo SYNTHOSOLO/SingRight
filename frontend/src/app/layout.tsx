@@ -7,6 +7,10 @@ export const metadata: Metadata = {
   description:
     "An interactive AI-powered vocal coach that listens to your singing in real time, " +
     "tracks pitch and volume, and delivers instant corrective feedback via WebRTC.",
+  icons: {
+    icon: "/logo.jpg",
+    apple: "/logo.jpg",
+  },
 };
 
 export default function RootLayout({
@@ -28,7 +32,9 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="bg-mesh">{children}</body>
+      <body className="bg-mesh" suppressHydrationWarning>
+        {children}
+      </body>
     </html>
   );
 }

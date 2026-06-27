@@ -50,10 +50,12 @@ export function hzToNoteName(hz: number): string {
 
 /** Composite 0–100 live vocal energy from volume, confidence, and clarity. */
 export function computeLiveEnergy(metrics: VocalMetrics): number {
-  if (!metrics.isVoiced && metrics.frequencyHz <= 0) return 0;
-  const volNorm = Math.max(0, Math.min(1, (metrics.volumeDb + 55) / 45));
+  const volNorm = Math.max(0, Math.min(1, (metrics.volumeDb + 65) / 50));
+  if (!metrics.isVoiced && metrics.frequencyHz <= 0) {
+    return Math.round(volNorm * 35);
+  }
   const energy =
-    volNorm * 0.4 + metrics.pitchConfidence * 0.35 + metrics.clarity * 0.25;
+    volNorm * 0.45 + metrics.pitchConfidence * 0.3 + metrics.clarity * 0.25;
   return Math.round(Math.max(0, Math.min(100, energy * 100)));
 }
 

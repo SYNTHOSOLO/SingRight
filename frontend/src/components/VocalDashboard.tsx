@@ -8,21 +8,18 @@ import {
   useLocalParticipant,
   useRemoteParticipants,
 } from "@livekit/components-react";
-import { ConnectionState, RemoteAudioTrack } from "livekit-client";
-import type { DataPublishOptions } from "livekit-client";
+import { ConnectionState, RemoteAudioTrack, Track } from "livekit-client";
+import type { DataPublishOptions, LocalTrackPublication } from "livekit-client";
 import {
   Mic,
   MicOff,
   Activity,
   AlertTriangle,
   Music,
-  Volume2,
   Radio,
   Zap,
   Play,
   Pause,
-  TriangleAlert,
-  Headphones,
   MessageSquare,
   Eye,
   EyeOff,
@@ -33,18 +30,25 @@ import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
 import { useSongPlayback } from "@/hooks/useSongPlayback";
 import { useSyllableTracker } from "@/hooks/useSyllableTracker";
 import { useTonePlayer } from "@/hooks/useTonePlayer";
+import { Logo } from "@/components/Logo";
 import { SONG_EN001A } from "@/lib/songs/en001a";
 import { VOLUME_SILENCE_THRESHOLD_DB } from "@/lib/songs/pitch";
 import PitchLane from "@/components/PitchLane";
 import PitchContourChart from "@/components/PitchContourChart";
 import PerformanceIssues from "@/components/PerformanceIssues";
 import LiveSoundEnergy from "@/components/LiveSoundEnergy";
+import CoachMessagePanel, {
+  type CoachMessage,
+  type VisualCue,
+  type VisualCueTone,
+} from "@/components/CoachMessagePanel";
 import InstrumentNoteBoard from "@/components/InstrumentNoteBoard";
 import { hzToNoteName, type DemoInstrument } from "@/lib/audio/notes";
 import {
   parsePlayRequest,
   playRequestKey,
 } from "@/lib/audio/playRequestParser";
+import { captureVocalMicStream } from "@/lib/audio/micCapture";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -52,19 +56,14 @@ import {
 
 const TELEMETRY_INTERVAL_MS = 250; // how often we send metrics to the agent
 const DISPLAY_UPDATE_MS = 100; // throttle UI meter updates to reduce flicker
-const VOLUME_WARN_CLEAR_DB = -55;
-const PITCH_HOLD_MS = 250;
-const METRIC_SMOOTHING = 0.35;
+const VOLUME_WARN_CLEAR_DB = -62;
+const PITCH_HOLD_MS = 200;
+const METRIC_SMOOTHING = 0.45;
+const VOLUME_ATTACK_SMOOTHING = 0.7;
 const AUTO_FAULT_COOLDOWN_MS = 5000;
 const AUTO_FAULT_DELAY_MS = 1500;
 const VISUAL_CUE_FADE_MS = 3500;
-
-type VisualCueTone = "positive" | "corrective" | "neutral";
-
-interface VisualCue {
-  text: string;
-  tone: VisualCueTone;
-}
+const MAX_COACH_MESSAGES = 12;
 
 interface TranscriptLine {
   isAgent: boolean;
@@ -96,22 +95,8 @@ const VISUAL_CUE_STYLES: Record<
 const ACTIVE_SONG = SONG_EN001A;
 
 // ---------------------------------------------------------------------------
-// Helper: clamp a value to a 0 – 100 percentage
+// Helper
 // ---------------------------------------------------------------------------
-
-function dbToPercent(db: number): number {
-  // Map -100 dB … 0 dB → 0% … 100%
-  return Math.max(0, Math.min(100, ((db + 100) / 100) * 100));
-}
-
-function pitchToPercent(hz: number): number {
-  if (hz === 0) return 0;
-  // Map 60 Hz … 1200 Hz onto 0% … 100% logarithmically
-  const minLog = Math.log2(60);
-  const maxLog = Math.log2(1200);
-  const pct = ((Math.log2(hz) - minLog) / (maxLog - minLog)) * 100;
-  return Math.max(0, Math.min(100, pct));
-}
 
 function isAgentIdentity(identity: string): boolean {
   return identity.includes("agent") || identity.startsWith("agent-");
@@ -164,7 +149,7 @@ export default function VocalDashboard() {
   // ── LiveKit connection state ──────────────────────────────────────────────────
   const connectionState = useConnectionState();
   const isConnected = connectionState === ConnectionState.Connected;
-  const { microphoneTrack, localParticipant } = useLocalParticipant();
+  const { localParticipant } = useLocalParticipant();
 
   // ── Dashboard state ──────────────────────────────────────────────────
   const [coachingMode, setCoachingMode] = useState<"karaoke" | "conversational">("karaoke");
@@ -173,10 +158,15 @@ export default function VocalDashboard() {
   const [visualCue, setVisualCue] = useState<VisualCue | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [coachNotes, setCoachNotes] = useState<string | null>(null);
+  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
+  const coachMessageIdRef = useRef(0);
   const [coachStatus, setCoachStatus] = useState<
     "idle" | "speaking" | "paused"
   >("idle");
   const [sessionElapsed, setSessionElapsed] = useState(0);
+  const elapsedRef = useRef(0);
+  const audioClockActiveRef = useRef(false);
+  const lastElapsedUiUpdateRef = useRef(0);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [displayMetrics, setDisplayMetrics] = useState<VocalMetrics>({
     volumeDb: -100,
@@ -231,10 +221,20 @@ export default function VocalDashboard() {
 
   const lastPlayRequestRef = useRef<string>("");
   const lastPlayRequestAtRef = useRef(0);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micPubRef = useRef<LocalTrackPublication | null>(null);
 
   const tonePlayer = useTonePlayer();
   const tonePlayerRef = useRef(tonePlayer);
   tonePlayerRef.current = tonePlayer;
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
 
   const sendAnalysisSnapshot = useCallback(() => {
     const sendFn = sendTelemetryRef.current;
@@ -262,6 +262,25 @@ export default function VocalDashboard() {
     ((payload: Uint8Array, options: DataPublishOptions) => Promise<void>) | null
   >(null);
 
+  const pushCoachMessage = useCallback(
+    (
+      text: string,
+      kind: CoachMessage["kind"],
+      tone?: VisualCueTone
+    ) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const id = `coach-${coachMessageIdRef.current++}`;
+      setCoachMessages((prev) => {
+        const next = [...prev, { id, text: trimmed, kind, tone }];
+        return next.length > MAX_COACH_MESSAGES
+          ? next.slice(next.length - MAX_COACH_MESSAGES)
+          : next;
+      });
+    },
+    []
+  );
+
   // ── Data channel: send & receive ──────────────────────────────────────
   const onDataReceived = useCallback(
     (msg: { payload: Uint8Array; topic?: string }) => {
@@ -283,11 +302,13 @@ export default function VocalDashboard() {
           setCoachDemonstrating(false);
         } else if (action === "SHOW_TIPS") {
           setCoachNotes(notes ?? null);
+          if (notes) pushCoachMessage(notes, "tip");
         } else if (action === "SHOW_CUE") {
           const cue = (parsed.cue as string) ?? "";
           const tone = (parsed.tone as VisualCueTone) ?? "neutral";
           if (cue) {
             setVisualCue({ text: cue, tone });
+            pushCoachMessage(cue, "cue", tone);
             if (visualCueTimerRef.current) clearTimeout(visualCueTimerRef.current);
             visualCueTimerRef.current = setTimeout(() => {
               setVisualCue(null);
@@ -309,6 +330,7 @@ export default function VocalDashboard() {
             setCoachNotes(
               notes ?? `On the board: ${rawNotes.map((n) => n.note_name).join(", ")}`
             );
+            if (notes) pushCoachMessage(notes, "note");
           }
         } else if (action === "PLAY_REFERENCE_TONE") {
           const hz = parsed.frequency_hz as number;
@@ -328,6 +350,7 @@ export default function VocalDashboard() {
           setCoachNotes(
             notes ?? `Reference tone: ${syllable ?? noteName} ${hz?.toFixed(0)} Hz`
           );
+          if (notes) pushCoachMessage(notes, "note");
           void tonePlayerRef.current.playTone(hz, durationMs, inst).finally(() => {
             setCoachDemonstrating(false);
             setDemoActiveNote(null);
@@ -349,6 +372,7 @@ export default function VocalDashboard() {
             setCoachStatus("speaking");
             const label = validNotes.map((n) => n.note_name).join(" → ");
             setCoachNotes(notes ?? `Playing: ${label}`);
+            if (notes) pushCoachMessage(notes, "note");
             const events = validNotes.map((n) => ({
               frequencyHz: n.frequency_hz,
               durationMs: n.duration_ms ?? 1200,
@@ -375,6 +399,7 @@ export default function VocalDashboard() {
             setCoachDemonstrating(true);
             setCoachStatus("speaking");
             setCoachNotes(notes ?? `Playing: ${group.lyricText}`);
+            if (notes) pushCoachMessage(notes, "note");
             const events = group.syllables.map((s) => ({
               frequencyHz: s.expectedHz,
               durationMs: Math.max(300, Math.round((s.end - s.start) * 1000)),
@@ -386,13 +411,14 @@ export default function VocalDashboard() {
           }
         } else if (action === "REQUEST_ANALYSIS") {
           setCoachNotes(notes ?? "Running detailed voice analysis…");
+          if (notes) pushCoachMessage(notes, "note");
           sendAnalysisSnapshot();
         }
       } catch {
         // Non-JSON payloads are silently ignored.
       }
     },
-    [sendAnalysisSnapshot]
+    [sendAnalysisSnapshot, pushCoachMessage]
   );
 
   const { send: sendData } = useDataChannel("session_control", onDataReceived);
@@ -412,8 +438,11 @@ export default function VocalDashboard() {
     const now = performance.now();
     const smoothed = smoothedRef.current;
 
-    smoothed.volumeDb +=
-      (m.volumeDb - smoothed.volumeDb) * METRIC_SMOOTHING;
+    const volumeAlpha =
+      m.volumeDb > smoothed.volumeDb
+        ? VOLUME_ATTACK_SMOOTHING
+        : METRIC_SMOOTHING;
+    smoothed.volumeDb += (m.volumeDb - smoothed.volumeDb) * volumeAlpha;
 
     if (m.frequencyHz > 0) {
       lastPitchAtRef.current = now;
@@ -764,7 +793,11 @@ export default function VocalDashboard() {
   const sessionStartRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive) {
+      audioClockActiveRef.current = false;
+      elapsedRef.current = 0;
+      return;
+    }
     sessionStartRef.current = performance.now();
   }, [isActive]);
 
@@ -772,21 +805,33 @@ export default function VocalDashboard() {
     if (isPaused || !isActive) return;
 
     let rafId: number;
-    const tick = () => {
+    const tick = (now: number) => {
+      let nextElapsed = elapsedRef.current;
+
       if (coachingMode === "karaoke") {
         const audioTime = songPlayback.getCurrentTime();
-        if (audioTime > 0) {
-          // Audio is running — use its timestamp (authoritative for syllable sync)
-          setSessionElapsed(audioTime);
+        if (!audioClockActiveRef.current) {
+          if (audioTime > 0.05) {
+            audioClockActiveRef.current = true;
+            nextElapsed = audioTime;
+          } else {
+            nextElapsed = (now - sessionStartRef.current) / 1000;
+          }
         } else {
-          // Audio not yet loaded — advance via wall clock so lane scrolls immediately
-          const wallSec = (performance.now() - sessionStartRef.current) / 1000;
-          setSessionElapsed(wallSec);
+          nextElapsed = audioTime;
         }
       } else {
-        const wallSec = (performance.now() - sessionStartRef.current) / 1000;
-        setSessionElapsed(wallSec);
+        nextElapsed = (now - sessionStartRef.current) / 1000;
       }
+
+      elapsedRef.current = nextElapsed;
+
+      // Throttle React updates — canvas reads elapsedRef directly at 60fps
+      if (now - lastElapsedUiUpdateRef.current >= 100) {
+        lastElapsedUiUpdateRef.current = now;
+        setSessionElapsed(nextElapsed);
+      }
+
       rafId = requestAnimationFrame(tick);
     };
 
@@ -795,9 +840,7 @@ export default function VocalDashboard() {
   }, [isPaused, isActive, coachingMode, songPlayback]);
 
 
-  // ── Derived values (smoothed for stable meter rendering) ──────────────
-  const volumePct = dbToPercent(displayMetrics.volumeDb);
-  const pitchPct = pitchToPercent(displayMetrics.frequencyHz);
+  // ── Derived values ──────────────────────────────────────────────────
   const targetPitchHz =
     coachingMode === "karaoke" && syllableTracker.expectedPitchHz > 0
       ? syllableTracker.expectedPitchHz
@@ -872,36 +915,50 @@ export default function VocalDashboard() {
 
   const handleSessionToggle = useCallback(async () => {
     if (isActive) {
-      // Stop publishing mic to LiveKit so agent stops hearing us
-      await localParticipant.setMicrophoneEnabled(false);
+      if (micPubRef.current?.track) {
+        await localParticipant.unpublishTrack(micPubRef.current.track);
+      } else {
+        await localParticipant.setMicrophoneEnabled(false);
+      }
+      micPubRef.current = null;
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
       songPlayback.stop();
       stop();
       tonePlayer.setInstrumentFollow(false);
       setInstrumentFollowEnabled(false);
       setSessionElapsed(0);
+      elapsedRef.current = 0;
+      audioClockActiveRef.current = false;
       sentSyllableResultsRef.current = 0;
       setMicError(null);
       setAllowAgentSpeech(false);
       setVisualCue(null);
+      setCoachMessages([]);
       return;
     }
 
     setMicError(null);
     try {
-      // 1. Publish mic to LiveKit room so the backend agent can hear us.
-      //    setMicrophoneEnabled returns the LocalTrackPublication directly.
-      const pub = await localParticipant.setMicrophoneEnabled(true);
-
-      // 2. Wire the same mic track into our Web Audio analyser.
-      //    Use the returned publication's track to avoid stale React state.
-      const mediaTrack = pub?.track?.mediaStreamTrack;
-      const stream = mediaTrack ? new MediaStream([mediaTrack]) : undefined;
+      // One raw mic stream feeds both pitch analysis and LiveKit (avoids double WebRTC processing).
+      await localParticipant.setMicrophoneEnabled(false);
+      const stream = await captureVocalMicStream();
+      micStreamRef.current = stream;
       await start(stream);
+
+      const mediaTrack = stream.getAudioTracks()[0];
+      const pub = await localParticipant.publishTrack(mediaTrack, {
+        source: Track.Source.Microphone,
+      });
+      micPubRef.current = pub;
 
       if (coachingMode === "karaoke") {
         await songPlayback.start();
       }
     } catch (err) {
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+      stop();
       setMicError(
         err instanceof Error ? err.message : "Failed to start microphone."
       );
@@ -920,80 +977,187 @@ export default function VocalDashboard() {
 
   // ── Render ────────────────────────────────────────────────────────────
   return (
-    <div className="relative mx-auto flex min-h-dvh max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
+    <div className="relative mx-auto flex h-dvh max-h-dvh max-w-7xl flex-col gap-3 overflow-hidden px-3 py-3 sm:px-4 lg:px-6">
       {/* ── Header ────────────────────────────────────────────────────── */}
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <header className="shrink-0 space-y-2">
+        {/* Row 1: brand, timer, session */}
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 shadow-lg shadow-violet-600/20">
-            <Headphones className="h-5 w-5 text-white" />
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <Logo className="h-9 w-9 rounded-xl" />
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-base font-bold tracking-tight text-white">
+                  AI Vocal Coach
+                </h1>
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                  Beta
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                    isConnected
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                      : connectionState === ConnectionState.Connecting ||
+                          connectionState === ConnectionState.Reconnecting
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                        : "border-rose-500/30 bg-rose-500/10 text-rose-400"
+                  }`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      isConnected
+                        ? "bg-emerald-400"
+                        : connectionState === ConnectionState.Disconnected
+                          ? "bg-rose-400"
+                          : "bg-amber-400 animate-pulse"
+                    }`}
+                  />
+                  {isConnected
+                    ? "Connected"
+                    : connectionState === ConnectionState.Connecting
+                      ? "Connecting"
+                      : connectionState === ConnectionState.Reconnecting
+                        ? "Reconnecting"
+                        : "Disconnected"}
+                </span>
+              </div>
+              <p className="truncate text-[11px] text-[var(--color-text-muted)]">
+                {ACTIVE_SONG.metadata.songname} · {ACTIVE_SONG.metadata.tempo} BPM ·{" "}
+                {ACTIVE_SONG.metadata.time_signature}
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-tight text-white">
-              AI Vocal Coach
-            </h1>
-            <p className="text-xs text-[var(--color-text-muted)]">
-              {ACTIVE_SONG.metadata.songname} · {ACTIVE_SONG.metadata.tempo} BPM ·{" "}
-              {ACTIVE_SONG.metadata.time_signature}
-            </p>
-          </div>
-        </div>
 
-        {/* Mode selector and Mic toggle */}
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Mode Selector Tab Bar */}
-          <div className="flex rounded-full bg-white/5 p-1 border border-white/5">
-            <button
-              onClick={() => setCoachingMode("karaoke")}
-              className={`rounded-full px-4 py-1.5 text-xs font-semibold transition ${
-                coachingMode === "karaoke"
-                  ? "bg-violet-600 text-white shadow"
-                  : "text-[var(--color-text-muted)] hover:text-white"
+          <div className="hidden shrink-0 text-right sm:block">
+            <p className="font-mono text-lg font-bold leading-none text-white">
+              {Math.floor(sessionElapsed / 60)
+                .toString()
+                .padStart(2, "0")}
+              :{Math.floor(sessionElapsed % 60)
+                .toString()
+                .padStart(2, "0")}
+            </p>
+            <p
+              className={`text-[10px] font-semibold uppercase tracking-wide ${
+                isPaused
+                  ? "text-amber-400"
+                  : isActive
+                    ? "text-emerald-400"
+                    : "text-zinc-500"
               }`}
             >
-              Karaoke Mode
-            </button>
-            <button
-              onClick={() => setCoachingMode("conversational")}
-              className={`rounded-full px-4 py-1.5 text-xs font-semibold transition ${
-                coachingMode === "conversational"
-                  ? "bg-violet-600 text-white shadow"
-                  : "text-[var(--color-text-muted)] hover:text-white"
-              }`}
-            >
-              Conversational Mode
-            </button>
+              {isPaused ? "Paused" : isActive ? "Recording" : "Idle"}
+            </p>
           </div>
 
           <button
             onClick={handleSessionToggle}
-            className={`group relative flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold transition-all duration-300 ${
+            className={`shrink-0 flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-all duration-300 ${
               isActive
-                ? "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 border border-rose-500/30"
+                ? "border border-rose-500/30 bg-rose-500/15 text-rose-400 hover:bg-rose-500/25"
                 : "bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white hover:shadow-lg hover:shadow-violet-600/25"
             }`}
           >
             {isActive ? (
               <>
                 <MicOff className="h-4 w-4" />
-                Stop Session
+                <span className="hidden sm:inline">Stop Session</span>
+                <span className="sm:hidden">Stop</span>
               </>
             ) : (
               <>
                 <Mic className="h-4 w-4" />
-                Start Session
+                <span className="hidden sm:inline">Start Session</span>
+                <span className="sm:hidden">Start</span>
               </>
             )}
           </button>
+        </div>
+
+        {/* Row 2: modes + instrument mirror */}
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border-subtle)] bg-white/[0.02] px-2 py-1.5">
+          <div className="flex rounded-full bg-white/5 p-0.5">
+            <button
+              onClick={() => setCoachingMode("karaoke")}
+              className={`rounded-full px-3 py-1 text-[11px] font-semibold transition ${
+                coachingMode === "karaoke"
+                  ? "bg-violet-600 text-white shadow"
+                  : "text-[var(--color-text-muted)] hover:text-white"
+              }`}
+            >
+              Karaoke
+            </button>
+            <button
+              onClick={() => setCoachingMode("conversational")}
+              className={`rounded-full px-3 py-1 text-[11px] font-semibold transition ${
+                coachingMode === "conversational"
+                  ? "bg-violet-600 text-white shadow"
+                  : "text-[var(--color-text-muted)] hover:text-white"
+              }`}
+            >
+              Conversational
+            </button>
+          </div>
+
+          <div className="hidden h-5 w-px bg-white/10 sm:block" />
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Guitar className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+            <span className="text-[11px] font-medium text-[var(--color-text-muted)]">
+              Mirror
+            </span>
+            <button
+              type="button"
+              disabled={!isActive}
+              onClick={() => setInstrumentFollowEnabled((v) => !v)}
+              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold transition disabled:opacity-40 ${
+                instrumentFollowEnabled
+                  ? "border border-emerald-500/30 bg-emerald-500/20 text-emerald-300"
+                  : "border border-white/10 bg-white/5 text-[var(--color-text-muted)]"
+              }`}
+            >
+              {instrumentFollowEnabled ? "On" : "Off"}
+            </button>
+            <div className="flex rounded-full bg-white/5 p-0.5">
+              {(
+                [
+                  ["piano", "Piano", Piano],
+                  ["guitar", "Guitar", Guitar],
+                  ["both", "Both", Music],
+                ] as const
+              ).map(([id, label, Icon]) => (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={!isActive}
+                  onClick={() => setFollowInstrument(id)}
+                  className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold transition disabled:opacity-40 ${
+                    followInstrument === id
+                      ? "bg-violet-600 text-white"
+                      : "text-[var(--color-text-muted)]"
+                  }`}
+                >
+                  <Icon className="h-2.5 w-2.5" />
+                  <span className="hidden md:inline">{label}</span>
+                </button>
+              ))}
+            </div>
+            {coachDemonstrating && (
+              <span className="flex items-center gap-1 text-[10px] text-violet-400">
+                <Music className="h-2.5 w-2.5" />
+                Demo
+              </span>
+            )}
+          </div>
         </div>
       </header>
 
       {/* ── Mic error ─────────────────────────────────────────────────── */}
       {(micError || analyzerError) && (
-        <div className="alert-overlay glass-card glow-rose flex items-start gap-3 border-rose-500/30 p-4">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
+        <div className="alert-overlay glass-card glow-rose flex shrink-0 items-start gap-3 border-rose-500/30 p-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
           <div>
-            <p className="text-sm font-semibold text-rose-300">Microphone Error</p>
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            <p className="text-xs font-semibold text-rose-300">Microphone Error</p>
+            <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
               {micError ?? analyzerError}
             </p>
           </div>
@@ -1002,27 +1166,32 @@ export default function VocalDashboard() {
 
       {/* ── Alert Overlay ─────────────────────────────────────────────── */}
       {alertMessage && (
-        <div className="alert-overlay glass-card glow-rose flex items-start gap-3 border-rose-500/30 p-4">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
+        <div className="alert-overlay glass-card glow-rose flex shrink-0 items-start gap-3 border-rose-500/30 p-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
           <div>
-            <p className="text-sm font-semibold text-rose-300">
+            <p className="text-xs font-semibold text-rose-300">
               Coach Intervention
             </p>
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
               {alertMessage}
             </p>
           </div>
         </div>
       )}
 
+      {/* ── Performance Analysis (always visible) ─────────────────────── */}
+      <PerformanceIssues
+        completedResults={syllableTracker.completedResults}
+      />
+
       {/* ── Main grid ─────────────────────────────────────────────────── */}
-      <div className="grid gap-6 lg:grid-cols-3">
+      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
         {/* ── Left column: Lyrics + Coach Feed ────────────────────────── */}
-        <div className="flex flex-col gap-6 lg:col-span-2">
+        <div className="flex min-h-0 flex-col gap-3">
           {/* Lyrics / Conversational Card */}
           {coachingMode === "karaoke" ? (
-            <section className="glass-card glow-violet overflow-hidden">
-              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+            <section className="glass-card glow-violet flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border-subtle)] px-4 py-2">
                 <Music className="h-4 w-4 text-violet-400" />
                 <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
                   Pitch Lane — {ACTIVE_SONG.metadata.songname}
@@ -1039,19 +1208,18 @@ export default function VocalDashboard() {
                 )}
               </div>
 
-              <div className="p-3">
+              <div className="min-h-0 flex-1 p-2">
                 <PitchLane
                   song={ACTIVE_SONG}
-                  elapsedSec={sessionElapsed}
+                  elapsedRef={elapsedRef}
                   livePitchHz={displayMetrics.frequencyHz}
                   activeSyllable={syllableTracker.activeSyllable}
-                  pitchDeltaCents={syllableTracker.pitchDeltaCents}
                   completedResults={syllableTracker.completedResults}
                 />
               </div>
             </section>
           ) : (
-            <section className="glass-card glow-violet overflow-hidden">
+            <section className="glass-card glow-violet flex min-h-0 flex-1 flex-col overflow-hidden">
               <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
                 <Radio className="h-4 w-4 text-cyan-400 animate-pulse" />
                 <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
@@ -1090,7 +1258,7 @@ export default function VocalDashboard() {
               </div>
 
               {/* Big visual coaching cue */}
-              <div className="relative flex min-h-[140px] items-center justify-center border-b border-[var(--color-border-subtle)] bg-[#0a0a0f]/60 px-6 py-8">
+              <div className="relative flex min-h-[100px] flex-1 items-center justify-center border-b border-[var(--color-border-subtle)] bg-[#0a0a0f]/60 px-4 py-4">
                 {visualCue ? (
                   <p
                     key={visualCue.text}
@@ -1117,7 +1285,7 @@ export default function VocalDashboard() {
               </div>
 
               {/* Live transcript */}
-              <div className="flex flex-col gap-3 px-5 py-4">
+              <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 py-3">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
                     Live Transcript
@@ -1135,7 +1303,7 @@ export default function VocalDashboard() {
 
                 <div
                   ref={transcriptScrollRef}
-                  className="flex max-h-[180px] flex-col gap-2 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800"
+                  className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800"
                 >
                   {transcriptLines.length === 0 ? (
                     <p className="text-sm italic text-[var(--color-text-muted)]">
@@ -1181,10 +1349,10 @@ export default function VocalDashboard() {
           )}
 
           {coachingMode === "karaoke" && isActive && (
-            <section className="glass-card overflow-hidden p-4">
-              <div className="mb-2 flex items-center gap-2">
-                <Activity className="h-4 w-4 text-violet-400" />
-                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+            <section className="glass-card shrink-0 overflow-hidden p-2">
+              <div className="mb-1 flex items-center gap-2 px-1">
+                <Activity className="h-3.5 w-3.5 text-violet-400" />
+                <h2 className="text-xs font-semibold text-[var(--color-text-secondary)]">
                   Pitch Contour
                 </h2>
               </div>
@@ -1198,47 +1366,46 @@ export default function VocalDashboard() {
             </section>
           )}
 
-          {/* Audio Waveform visualizer */}
-          <section className="glass-card overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Activity className="h-4 w-4 text-cyan-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Live Input Signal Waveform
-              </h2>
-              {isActive && (
-                <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-cyan-500/20 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
-                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
-                  Active Analyser
-                </span>
-              )}
-            </div>
-            <div className="relative h-24 w-full bg-[#0a0a0f] p-1">
-              {isActive ? (
-                <canvas
-                  ref={canvasRef}
-                  width={600}
-                  height={96}
-                  className="h-full w-full rounded-lg"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center text-xs italic text-[var(--color-text-muted)]">
-                  Mic inactive — start session to stream and visualize signal waveform
-                </div>
-              )}
-            </div>
-          </section>
+          <div className="grid min-h-0 shrink-0 gap-3 md:grid-cols-2">
+            {/* Compact waveform */}
+            <section className="glass-card overflow-hidden">
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-1.5">
+                <Activity className="h-3.5 w-3.5 text-cyan-400" />
+                <h2 className="text-xs font-semibold text-[var(--color-text-secondary)]">
+                  Signal
+                </h2>
+                {isActive && (
+                  <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-cyan-500/20 px-1.5 py-0.5 text-[9px] font-medium text-cyan-300">
+                    <span className="h-1 w-1 rounded-full bg-cyan-400 animate-ping" />
+                    Live
+                  </span>
+                )}
+              </div>
+              <div className="relative h-14 w-full bg-[#0a0a0f] p-0.5">
+                {isActive ? (
+                  <canvas
+                    ref={canvasRef}
+                    width={600}
+                    height={56}
+                    className="h-full w-full rounded-lg"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-[10px] italic text-[var(--color-text-muted)]">
+                    Mic inactive
+                  </div>
+                )}
+              </div>
+            </section>
 
-          <div className="grid gap-6 md:grid-cols-2">
             {/* Coach live feed */}
             <section className="glass-card overflow-hidden">
-              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-                <MessageSquare className="h-4 w-4 text-cyan-400" />
-                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                  AI Coach Live Feed
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-1.5">
+                <MessageSquare className="h-3.5 w-3.5 text-cyan-400" />
+                <h2 className="text-xs font-semibold text-[var(--color-text-secondary)]">
+                  Coach Feed
                 </h2>
-                {/* Status indicator */}
-                <span className="ml-auto flex items-center gap-2">
-                  <span className="relative flex h-2.5 w-2.5">
+                <span className="ml-auto flex items-center gap-1.5">
+                  <span className="relative flex h-2 w-2">
                     <span
                       className={`pulse-dot absolute inline-flex h-full w-full rounded-full ${
                         coachStatus === "speaking"
@@ -1249,57 +1416,57 @@ export default function VocalDashboard() {
                       }`}
                     />
                   </span>
-                  <span className="text-xs capitalize text-[var(--color-text-muted)]">
+                  <span className="text-[10px] capitalize text-[var(--color-text-muted)]">
                     {coachStatus}
                   </span>
                 </span>
               </div>
 
-              <div className="px-5 py-4">
+              <div className="max-h-14 overflow-y-auto px-3 py-2">
                 {coachNotes ? (
-                  <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                  <p className="text-xs leading-relaxed text-[var(--color-text-secondary)]">
                     {coachNotes}
                   </p>
                 ) : (
-                  <p className="text-sm italic text-[var(--color-text-muted)]">
+                  <p className="text-xs italic text-[var(--color-text-muted)]">
                     {isActive
                       ? coachingMode === "conversational" && nonInterruptMode
-                        ? "Silent mode — glance at the big cue above while you sing."
-                        : "Listening… The coach will chime in when it has feedback."
-                      : "Start a session to receive live coaching."}
+                        ? "Silent mode — watch the cue above."
+                        : "Listening for feedback…"
+                      : "Start a session to receive coaching."}
                   </p>
                 )}
               </div>
             </section>
+          </div>
 
-            {/* Real-time Transcription Stream — karaoke only (conversational has its own panel) */}
-            {coachingMode === "karaoke" && (
-            <section className="glass-card overflow-hidden">
-              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-                <Radio className="h-4 w-4 text-fuchsia-400 animate-pulse" />
-                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                  Live Transcription Stream
+          {coachingMode === "karaoke" && (
+            <section className="glass-card shrink-0 overflow-hidden">
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-1.5">
+                <Radio className="h-3.5 w-3.5 text-fuchsia-400 animate-pulse" />
+                <h2 className="text-xs font-semibold text-[var(--color-text-secondary)]">
+                  Live Transcription
                 </h2>
               </div>
               <div
                 ref={karaokeTranscriptScrollRef}
-                className="flex max-h-[120px] flex-col gap-2 overflow-y-auto px-5 py-4 scrollbar-thin scrollbar-thumb-zinc-800"
+                className="flex max-h-14 flex-col gap-1 overflow-y-auto px-3 py-2 scrollbar-thin scrollbar-thumb-zinc-800"
               >
                 {transcriptLines.length === 0 ? (
-                  <p className="text-sm italic text-[var(--color-text-muted)]">
+                  <p className="text-xs italic text-[var(--color-text-muted)]">
                     No speech detected yet.
                   </p>
                 ) : (
                   transcriptLines.map((line) => (
-                    <div key={line.key} className="flex flex-col gap-0.5 text-xs">
+                    <div key={line.key} className="flex gap-1.5 text-[11px]">
                       <span
-                        className={`font-semibold ${
+                        className={`shrink-0 font-semibold ${
                           line.isAgent ? "text-cyan-400" : "text-violet-400"
                         }`}
                       >
-                        {line.isAgent ? "Coach" : "Student"}:
+                        {line.isAgent ? "Coach" : "You"}:
                       </span>
-                      <p className="text-[var(--color-text-secondary)] leading-relaxed">
+                      <p className="truncate text-[var(--color-text-secondary)]">
                         {line.text}
                       </p>
                     </div>
@@ -1307,16 +1474,27 @@ export default function VocalDashboard() {
                 )}
               </div>
             </section>
-            )}
-          </div>
+          )}
         </div>
 
         {/* ── Right column: Telemetry + Controls ──────────────────────── */}
-        <div className="flex flex-col gap-6">
+        <div className="flex min-h-0 flex-col gap-2 overflow-y-auto lg:overflow-hidden">
+          <CoachMessagePanel
+            visualCue={visualCue}
+            messages={coachMessages}
+            isActive={isActive}
+            coachingMode={coachingMode}
+            nonInterruptMode={nonInterruptMode}
+          />
+
           <LiveSoundEnergy
             metrics={displayMetrics}
             targetNote={targetNote}
             isActive={isActive}
+            isVolumeWarn={isVolumeWarn}
+            targetPitchHz={targetPitchHz}
+            pitchDeltaCents={pitchDeltaCents}
+            isPitchWarn={isPitchWarn}
           />
 
           <InstrumentNoteBoard
@@ -1330,242 +1508,45 @@ export default function VocalDashboard() {
             coachDemonstrating={coachDemonstrating}
           />
 
-          {/* Instrument follow toggle */}
-          <section className="glass-card overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Guitar className="h-4 w-4 text-amber-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Instrument Mirror
-              </h2>
-              <button
-                type="button"
-                disabled={!isActive}
-                onClick={() => setInstrumentFollowEnabled((v) => !v)}
-                className={`ml-auto rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-40 ${
-                  instrumentFollowEnabled
-                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                    : "bg-white/5 text-[var(--color-text-muted)] border border-white/10"
-                }`}
-              >
-                {instrumentFollowEnabled ? "On" : "Off"}
-              </button>
-            </div>
-            <div className="space-y-3 px-5 py-4">
-              <p className="text-xs text-[var(--color-text-muted)]">
-                Mirror your sung pitch as live piano/guitar simulation. Turn on
-                before singing — coach samples also use this sound.
-              </p>
-              <div className="flex rounded-full bg-white/5 p-0.5 border border-white/5">
-                {(
-                  [
-                    ["piano", "Piano", Piano],
-                    ["guitar", "Guitar", Guitar],
-                    ["both", "Both", Music],
-                  ] as const
-                ).map(([id, label, Icon]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    disabled={!isActive}
-                    onClick={() => setFollowInstrument(id)}
-                    className={`flex flex-1 items-center justify-center gap-1 rounded-full px-2 py-1.5 text-[10px] font-semibold transition disabled:opacity-40 ${
-                      followInstrument === id
-                        ? "bg-violet-600 text-white"
-                        : "text-[var(--color-text-muted)]"
-                    }`}
-                  >
-                    <Icon className="h-3 w-3" />
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {instrumentFollowEnabled && isActive && displayMetrics.isVoiced && (
-                <p className="text-center text-xs text-cyan-400">
-                  Mirroring {displayMetrics.noteName.replace("#", "♯")} on{" "}
-                  {followInstrument}
-                </p>
-              )}
-            </div>
-          </section>
-
-          {/* Volume gauge */}
-          <section className="glass-card overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Volume2 className="h-4 w-4 text-emerald-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Volume
-              </h2>
-              <span className="ml-auto font-mono text-xs text-[var(--color-text-muted)]">
-                {displayMetrics.volumeDb.toFixed(1)} dB
-              </span>
-            </div>
-            <div className="px-5 py-4">
-              <div className="h-3 w-full overflow-hidden rounded-full bg-white/5">
-                <div
-                  className={`meter-fill ${isVolumeWarn ? "meter-fill-warn" : ""}`}
-                  style={{ width: `${volumePct}%` }}
-                />
-              </div>
-              {isVolumeWarn && isActive && (
-                <p className="mt-2 flex items-center gap-1 text-xs text-amber-400">
-                  <TriangleAlert className="h-3 w-3" /> Very low volume
-                </p>
-              )}
-            </div>
-          </section>
-
-          {/* Pitch gauge */}
-          <section className="glass-card overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Activity className="h-4 w-4 text-cyan-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Pitch
-              </h2>
-              <span className="ml-auto font-mono text-xs text-[var(--color-text-muted)]">
-                {displayMetrics.frequencyHz > 0
-                  ? `${displayMetrics.noteName} · ${displayMetrics.frequencyHz.toFixed(1)} Hz`
-                  : "—"}
-              </span>
-            </div>
-            <div className="px-5 py-4">
-              <div className="h-3 w-full overflow-hidden rounded-full bg-white/5">
-                <div
-                  className={`meter-fill ${isPitchWarn ? "meter-fill-warn" : ""}`}
-                  style={{ width: `${pitchPct}%` }}
-                />
-              </div>
-              <div className="mt-2 flex items-center justify-between text-xs text-[var(--color-text-muted)]">
-                <span>
-                  {targetPitchHz > 0
-                    ? `Target: ${targetPitchHz.toFixed(0)} Hz`
-                    : syllableTracker.isRest
-                    ? "Rest"
-                    : "Target: —"}
-                </span>
-                {displayMetrics.frequencyHz > 0 && targetPitchHz > 0 && (
-                  <span
-                    className={
-                      isPitchWarn ? "text-rose-400" : "text-emerald-400"
-                    }
-                  >
-                    Δ {Math.abs(pitchDeltaCents).toFixed(0)}¢
-                    {pitchDeltaCents > 0 ? " sharp" : pitchDeltaCents < 0 ? " flat" : ""}
-                  </span>
-                )}
-              </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-                <div className="rounded-lg bg-white/5 px-2 py-1.5">
-                  <p className="text-[var(--color-text-muted)]">Confidence</p>
-                  <p className={`font-mono font-semibold ${displayMetrics.pitchConfidence > 0.5 ? "text-emerald-400" : "text-zinc-400"}`}>
-                    {(displayMetrics.pitchConfidence * 100).toFixed(0)}%
-                  </p>
-                </div>
-                <div className="rounded-lg bg-white/5 px-2 py-1.5">
-                  <p className="text-[var(--color-text-muted)]">Clarity</p>
-                  <p className={`font-mono font-semibold ${displayMetrics.clarity > 0.3 ? "text-cyan-400" : "text-zinc-400"}`}>
-                    {(displayMetrics.clarity * 100).toFixed(0)}%
-                  </p>
-                </div>
-                <div className="rounded-lg bg-white/5 px-2 py-1.5">
-                  <p className="text-[var(--color-text-muted)]">Voiced</p>
-                  <p className={`font-semibold ${displayMetrics.isVoiced ? "text-emerald-400" : "text-zinc-500"}`}>
-                    {displayMetrics.isVoiced ? "Yes" : "No"}
-                  </p>
-                </div>
-              </div>
-              {coachDemonstrating && (
-                <p className="mt-2 flex items-center gap-1 text-xs text-violet-400">
-                  <Music className="h-3 w-3" /> Coach playing reference tones…
-                </p>
-              )}
-            </div>
-          </section>
-
-          <PerformanceIssues
-            completedResults={syllableTracker.completedResults}
-          />
-
-          {/* Session info */}
-          <section className="glass-card overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Radio className="h-4 w-4 text-fuchsia-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Session
-              </h2>
-            </div>
-            <div className="grid grid-cols-2 gap-4 px-5 py-4">
-              <div>
-                <p className="text-xs text-[var(--color-text-muted)]">
-                  Elapsed
-                </p>
-                <p className="mt-0.5 font-mono text-lg font-bold text-white">
-                  {Math.floor(sessionElapsed / 60)
-                    .toString()
-                    .padStart(2, "0")}
-                  :{Math.floor(sessionElapsed % 60)
-                    .toString()
-                    .padStart(2, "0")}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-[var(--color-text-muted)]">Status</p>
-                <p
-                  className={`mt-0.5 text-sm font-semibold ${
-                    isPaused
-                      ? "text-amber-400"
-                      : isActive
-                      ? "text-emerald-400"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  {isPaused ? "Paused" : isActive ? "Recording" : "Idle"}
-                </p>
-              </div>
-            </div>
-          </section>
-
-          {/* Simulate fault controls */}
-          <section className="glass-card overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Zap className="h-4 w-4 text-amber-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Debug Controls
-              </h2>
-            </div>
-            <div className="flex flex-col gap-2 px-5 py-4">
+          {/* Debug controls — collapsed by default */}
+          <details className="glass-card shrink-0 overflow-hidden">
+            <summary className="flex cursor-pointer list-none items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-2 text-xs font-semibold text-[var(--color-text-secondary)] marker:content-none">
+              <Zap className="h-3.5 w-3.5 text-amber-400" />
+              Debug Controls
+            </summary>
+            <div className="flex flex-col gap-1.5 px-3 py-2">
               <button
                 disabled={!isConnected}
                 onClick={() => sendCriticalError("VOLUME_SILENCE", true)}
-                className="flex items-center justify-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-amber-400 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-[10px] font-semibold text-amber-400 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <AlertTriangle className="h-3.5 w-3.5" />
+                <AlertTriangle className="h-3 w-3" />
                 Simulate Volume Fault
               </button>
               <button
                 disabled={!isConnected}
                 onClick={() => sendCriticalError("PITCH_OFF_TARGET", true)}
-                className="flex items-center justify-center gap-2 rounded-lg border border-rose-500/20 bg-rose-500/10 px-4 py-2 text-xs font-semibold text-rose-400 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-[10px] font-semibold text-rose-400 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <AlertTriangle className="h-3.5 w-3.5" />
+                <AlertTriangle className="h-3 w-3" />
                 Simulate Pitch Fault
               </button>
               <button
                 disabled={!isConnected || !isPaused}
                 onClick={() => {
-                  // Manually send a resume to clear paused state for testing
                   const pkt = JSON.stringify({
                     action: "RESUME_TRACK",
                     coach_notes: "Resuming session manually.",
                   });
                   sendData(new TextEncoder().encode(pkt), { reliable: true });
                 }}
-                className="flex items-center justify-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-xs font-semibold text-emerald-400 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-[10px] font-semibold text-emerald-400 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <Play className="h-3.5 w-3.5" />
+                <Play className="h-3 w-3" />
                 Force Resume
               </button>
             </div>
-          </section>
+          </details>
         </div>
       </div>
     </div>

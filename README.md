@@ -1,6 +1,12 @@
-# Interactive AI Vocal Coach
+<p align="center">
+  <img src="images/logo.jpg" alt="AI Vocal Coach logo" width="160" />
+</p>
 
-A real-time AI-powered vocal coaching application built with **Next.js**, **LiveKit WebRTC**, and **OpenAI Realtime Multimodal Audio**.
+<h1 align="center">Interactive AI Vocal Coach</h1>
+
+<p align="center">
+  A real-time AI-powered vocal coaching application built with <strong>Next.js</strong>, <strong>LiveKit WebRTC</strong>, and <strong>OpenAI Realtime Multimodal Audio</strong>.
+</p>
 
 ## Architecture
 

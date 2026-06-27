@@ -32,7 +32,7 @@ export function detectPitchYin(
   let rms = 0;
   for (let i = 0; i < n; i++) rms += buffer[i] * buffer[i];
   rms = Math.sqrt(rms / n);
-  if (rms < 0.008) return empty;
+  if (rms < 0.002) return empty;
 
   const yin = new Float32Array(n);
   yin[0] = 1;
@@ -70,7 +70,7 @@ export function detectPitchYin(
         bestTau = tau;
       }
     }
-    if (bestTau === -1 || minVal > 0.4) return empty;
+    if (bestTau === -1 || minVal > (rms > 0.04 ? 0.55 : 0.45)) return empty;
   }
 
   // Parabolic interpolation
@@ -91,7 +91,11 @@ export function detectPitchYin(
   const confidence = Math.max(0, Math.min(1, 1 - yin[bestTau]));
   const clarity = computeHarmonicClarity(buffer, sampleRate, frequencyHz);
   const midiNote = Math.round(69 + 12 * Math.log2(frequencyHz / 440));
-  const isVoiced = confidence > 0.5 && clarity > 0.15;
+
+  // Shouted / loud vocals have more broadband energy — relax gates when level is high.
+  const minConfidence = rms > 0.05 ? 0.3 : rms > 0.02 ? 0.4 : 0.5;
+  const minClarity = rms > 0.05 ? 0.06 : rms > 0.02 ? 0.1 : 0.15;
+  const isVoiced = confidence > minConfidence && clarity > minClarity;
 
   return {
     frequencyHz: Math.round(frequencyHz * 10) / 10,

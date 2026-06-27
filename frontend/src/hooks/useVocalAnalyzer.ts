@@ -14,6 +14,8 @@ export interface VocalMetrics {
 
 export interface UseVocalAnalyzerOptions {
   fftSize?: number;
+  /** Pre-analyser gain — compensates for quiet LiveKit / browser mic levels. */
+  analysisGain?: number;
   onMetricsUpdate?: (metrics: VocalMetrics) => void;
 }
 
@@ -27,6 +29,24 @@ export interface UseVocalAnalyzerReturn {
 }
 
 const DEFAULT_FFT_SIZE = 2048;
+const DEFAULT_ANALYSIS_GAIN = 3;
+
+function measureVolumeDb(samples: Float32Array): number {
+  let sumSq = 0;
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i];
+    sumSq += v * v;
+    const abs = Math.abs(v);
+    if (abs > peak) peak = abs;
+  }
+  const rms = Math.sqrt(sumSq / samples.length);
+  const rmsDb = rms > 0 ? 20 * Math.log10(rms) : -100;
+  const peakDb = peak > 0 ? 20 * Math.log10(peak) : -100;
+  // Peak tracks perceived loudness; RMS tracks sustained energy — blend both.
+  const blended = Math.max(rmsDb, peakDb - 6);
+  return Math.max(-100, blended);
+}
 const EMPTY_METRICS: VocalMetrics = {
   volumeDb: -100,
   frequencyHz: 0,
@@ -39,7 +59,11 @@ const EMPTY_METRICS: VocalMetrics = {
 export function useVocalAnalyzer(
   options: UseVocalAnalyzerOptions = {}
 ): UseVocalAnalyzerReturn {
-  const { fftSize = DEFAULT_FFT_SIZE, onMetricsUpdate } = options;
+  const {
+    fftSize = DEFAULT_FFT_SIZE,
+    analysisGain = DEFAULT_ANALYSIS_GAIN,
+    onMetricsUpdate,
+  } = options;
 
   const [isActive, setIsActive] = useState(false);
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
@@ -52,6 +76,7 @@ export function useVocalAnalyzer(
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const gainRef = useRef<GainNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const ownsStreamRef = useRef(false);
   const rafIdRef = useRef<number>(0);
@@ -65,13 +90,7 @@ export function useVocalAnalyzer(
     const timeDomain = new Float32Array(bufferLength);
     analyser.getFloatTimeDomainData(timeDomain);
 
-    let sumSq = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      sumSq += timeDomain[i] * timeDomain[i];
-    }
-    const rms = Math.sqrt(sumSq / bufferLength);
-    const volumeDb = rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
-
+    const volumeDb = measureVolumeDb(timeDomain);
     const pitch = detectPitchYin(timeDomain, audioCtx.sampleRate);
 
     const snapshot: VocalMetrics = {
@@ -97,25 +116,24 @@ export function useVocalAnalyzer(
         ownsStreamRef.current = !stream;
 
         if (!stream) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: false,
-            },
-          });
+          const { captureVocalMicStream } = await import("@/lib/audio/micCapture");
+          stream = await captureVocalMicStream();
         }
 
         const audioCtx = new AudioContext();
         await audioCtx.resume();
 
         const source = audioCtx.createMediaStreamSource(stream);
+        const gain = audioCtx.createGain();
+        gain.gain.value = analysisGain;
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = fftSize;
-        analyser.smoothingTimeConstant = 0.2;
-        source.connect(analyser);
+        analyser.smoothingTimeConstant = 0.05;
+        source.connect(gain);
+        gain.connect(analyser);
 
         audioCtxRef.current = audioCtx;
+        gainRef.current = gain;
         analyserRef.current = analyser;
         sourceRef.current = source;
         streamRef.current = stream;
@@ -134,12 +152,13 @@ export function useVocalAnalyzer(
         throw err;
       }
     },
-    [isActive, fftSize, tick]
+    [isActive, fftSize, analysisGain, tick]
   );
 
   const stop = useCallback(() => {
     cancelAnimationFrame(rafIdRef.current);
     sourceRef.current?.disconnect();
+    gainRef.current?.disconnect();
     analyserRef.current?.disconnect();
 
     if (ownsStreamRef.current) {
@@ -149,6 +168,7 @@ export function useVocalAnalyzer(
     audioCtxRef.current?.close();
 
     audioCtxRef.current = null;
+    gainRef.current = null;
     analyserRef.current = null;
     sourceRef.current = null;
     streamRef.current = null;
