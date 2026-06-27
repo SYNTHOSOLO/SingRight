@@ -27,6 +27,8 @@ export interface UseVocalAnalyzerReturn {
   isActive: boolean;
   /** Latest computed metrics snapshot. */
   metrics: VocalMetrics;
+  /** Expose the raw AnalyserNode for audio visualization. */
+  analyserNode: AnalyserNode | null;
   /** Start mic capture & analysis. */
   start: () => Promise<void>;
   /** Stop mic capture & analysis. */
@@ -262,5 +264,5 @@ export function useVocalAnalyzer(
     };
   }, []);
 
-  return { isActive, metrics, start, stop };
+  return { isActive, metrics, analyserNode: analyserRef.current, start, stop };
 }

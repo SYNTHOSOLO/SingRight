@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useDataChannel, useConnectionState } from "@livekit/components-react";
+import { useDataChannel, useConnectionState, useTranscriptions } from "@livekit/components-react";
 import { ConnectionState } from "livekit-client";
 import {
   Mic,
@@ -123,9 +123,71 @@ export default function VocalDashboard() {
     setLatestMetrics(m);
   }, []);
 
-  const { isActive, metrics, start, stop } = useVocalAnalyzer({
+  const { isActive, metrics, analyserNode, start, stop } = useVocalAnalyzer({
     onMetricsUpdate,
   });
+
+  // ── Canvas Waveform Visualizer ─────────────────────────────────────────
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (!isActive || !analyserNode || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let animationFrameId: number;
+    const bufferLength = analyserNode.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    const draw = () => {
+      animationFrameId = requestAnimationFrame(draw);
+      analyserNode.getByteTimeDomainData(dataArray);
+
+      // Clean drawing area with subtle decay
+      ctx.fillStyle = "rgba(10, 10, 15, 0.25)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.lineWidth = 2.5;
+      
+      const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
+      gradient.addColorStop(0, "#8b5cf6"); // violet-500
+      gradient.addColorStop(0.5, "#06b6d4"); // cyan-500
+      gradient.addColorStop(1, "#d946ef"); // fuchsia-500
+      ctx.strokeStyle = gradient;
+      
+      ctx.beginPath();
+
+      const sliceWidth = canvas.width / bufferLength;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        const v = dataArray[i] / 128.0;
+        const y = (v * canvas.height) / 2;
+
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+
+        x += sliceWidth;
+      }
+
+      ctx.lineTo(canvas.width, canvas.height / 2);
+      ctx.stroke();
+    };
+
+    draw();
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [isActive, analyserNode]);
+
+  // ── Real-time Transcription Stream ────────────────────────────────────
+  const transcriptions = useTranscriptions();
 
   // ── Telemetry dispatch interval ───────────────────────────────────────
   useEffect(() => {
@@ -286,46 +348,107 @@ export default function VocalDashboard() {
             </div>
           </section>
 
-          {/* Coach live feed */}
+          {/* Audio Waveform visualizer */}
           <section className="glass-card overflow-hidden">
             <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <MessageSquare className="h-4 w-4 text-cyan-400" />
+              <Activity className="h-4 w-4 text-cyan-400" />
               <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                AI Coach Live Feed
+                Live Input Signal Waveform
               </h2>
-              {/* Status indicator */}
-              <span className="ml-auto flex items-center gap-2">
-                <span className="relative flex h-2.5 w-2.5">
-                  <span
-                    className={`pulse-dot absolute inline-flex h-full w-full rounded-full ${
-                      coachStatus === "speaking"
-                        ? "bg-emerald-400"
-                        : coachStatus === "paused"
-                        ? "bg-rose-400"
-                        : "bg-zinc-500"
-                    }`}
-                  />
+              {isActive && (
+                <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-cyan-500/20 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
+                  Active Analyser
                 </span>
-                <span className="text-xs capitalize text-[var(--color-text-muted)]">
-                  {coachStatus}
-                </span>
-              </span>
+              )}
             </div>
-
-            <div className="px-5 py-4">
-              {coachNotes ? (
-                <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
-                  {coachNotes}
-                </p>
+            <div className="relative h-24 w-full bg-[#0a0a0f] p-1">
+              {isActive ? (
+                <canvas
+                  ref={canvasRef}
+                  width={600}
+                  height={96}
+                  className="h-full w-full rounded-lg"
+                />
               ) : (
-                <p className="text-sm italic text-[var(--color-text-muted)]">
-                  {isActive
-                    ? "Listening… The coach will chime in when it has feedback."
-                    : "Start a session to receive live coaching."}
-                </p>
+                <div className="flex h-full w-full items-center justify-center text-xs italic text-[var(--color-text-muted)]">
+                  Mic inactive — start session to stream and visualize signal waveform
+                </div>
               )}
             </div>
           </section>
+
+          <div className="grid gap-6 md:grid-cols-2">
+            {/* Coach live feed */}
+            <section className="glass-card overflow-hidden">
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+                <MessageSquare className="h-4 w-4 text-cyan-400" />
+                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                  AI Coach Live Feed
+                </h2>
+                {/* Status indicator */}
+                <span className="ml-auto flex items-center gap-2">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span
+                      className={`pulse-dot absolute inline-flex h-full w-full rounded-full ${
+                        coachStatus === "speaking"
+                          ? "bg-emerald-400"
+                          : coachStatus === "paused"
+                          ? "bg-rose-400"
+                          : "bg-zinc-500"
+                      }`}
+                    />
+                  </span>
+                  <span className="text-xs capitalize text-[var(--color-text-muted)]">
+                    {coachStatus}
+                  </span>
+                </span>
+              </div>
+
+              <div className="px-5 py-4">
+                {coachNotes ? (
+                  <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                    {coachNotes}
+                  </p>
+                ) : (
+                  <p className="text-sm italic text-[var(--color-text-muted)]">
+                    {isActive
+                      ? "Listening… The coach will chime in when it has feedback."
+                      : "Start a session to receive live coaching."}
+                  </p>
+                )}
+              </div>
+            </section>
+
+            {/* Real-time Transcription Stream */}
+            <section className="glass-card overflow-hidden">
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+                <Radio className="h-4 w-4 text-fuchsia-400 animate-pulse" />
+                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                  Live Transcription Stream
+                </h2>
+              </div>
+              <div className="flex flex-col gap-2 max-h-[120px] overflow-y-auto px-5 py-4 scrollbar-thin scrollbar-thumb-zinc-800">
+                {transcriptions.length === 0 ? (
+                  <p className="text-sm italic text-[var(--color-text-muted)]">
+                    No speech detected yet.
+                  </p>
+                ) : (
+                  transcriptions.map((t, idx) => {
+                    const isAgent = t.participantInfo?.identity?.includes("agent") || t.participantInfo?.identity === "";
+                    return (
+                      <div key={idx} className="flex flex-col gap-0.5 text-xs">
+                        <span className={`font-semibold ${isAgent ? "text-cyan-400" : "text-violet-400"}`}>
+                          {isAgent ? "Coach" : "Student"}:
+                        </span>
+                        <p className="text-[var(--color-text-secondary)] leading-relaxed">{t.text}</p>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+          </div>
         </div>
 
         {/* ── Right column: Telemetry + Controls ──────────────────────── */}
