@@ -18,7 +18,6 @@ from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
-    AutoSubscribe,
     JobContext,
     WorkerOptions,
     cli,
@@ -107,8 +106,7 @@ class VocalCoachAgent(Agent):
 async def entrypoint(ctx: JobContext) -> None:
     """Called once per room join — wires up telemetry listeners & starts the agent."""
 
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-    logger.info("Connected to room %s", ctx.room.name)
+    logger.info("Job accepted for room %s", ctx.room.name)
 
     openai_realtime = realtime.RealtimeModel(
         voice="shimmer",
@@ -187,11 +185,15 @@ async def entrypoint(ctx: JobContext) -> None:
         else:
             logger.debug("Unknown data-channel message type: %s", msg_type)
 
-    participant = await ctx.wait_for_participant()
+    # AgentSession connects to the room on start (per LiveKit docs).
     await session.start(
         room=ctx.room,
         agent=agent,
     )
+    logger.info("Connected to room %s", ctx.room.name)
+
+    participant = await ctx.wait_for_participant()
+    logger.info("Participant joined: %s", participant.identity)
 
     await session.generate_reply(
         instructions=(

@@ -82,7 +82,7 @@ export default function LiveKitProvider({
       token={token}
       serverUrl={serverUrl}
       connect={true}
-      audio={true}
+      audio={false}
       video={false}
       data-lk-theme="default"
       className="min-h-dvh"

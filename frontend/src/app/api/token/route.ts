@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient } from "livekit-server-sdk";
+
+const AGENT_NAME = "vocal-coach";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -10,12 +12,13 @@ export async function GET(request: Request) {
 
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
+  const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
 
-  if (!apiKey || !apiSecret) {
+  if (!apiKey || !apiSecret || !livekitUrl) {
     return NextResponse.json(
       {
         error:
-          "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be configured in environment variables",
+          "LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and NEXT_PUBLIC_LIVEKIT_URL must be configured",
       },
       { status: 500 }
     );
@@ -23,27 +26,60 @@ export async function GET(request: Request) {
 
   try {
     const at = new AccessToken(apiKey, apiSecret, { identity });
-
-    // addGrant with `as any` so TypeScript doesn't block the roomAgentDispatch
-    // field, which is valid in the JWT spec but missing from the SDK's TS types.
-    // The agentName "vocal-coach" matches our backend WorkerOptions(agent_name="vocal-coach").
     at.addGrant({
       roomJoin: true,
       room,
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
-      roomAgentDispatch: {
-        agentName: "vocal-coach",
-        metadata: JSON.stringify({ participant: identity }),
-      },
-    } as any);
-
+    });
     const token = await at.toJwt();
 
-    return NextResponse.json({ token });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    // Explicit dispatch via API (works for new and existing rooms).
+    // listDispatch returns 404 when the room does not exist yet — never gate
+    // createDispatch on it for fresh per-session room names.
+    const httpUrl = livekitUrl.replace(/^wss?:\/\//, "https://");
+    const dispatchClient = new AgentDispatchClient(httpUrl, apiKey, apiSecret);
+
+    try {
+      let hasCoach = false;
+      try {
+        const existingDispatches = await dispatchClient.listDispatch(room);
+        hasCoach = existingDispatches.some(
+          (d) => d.agentName === AGENT_NAME
+        );
+      } catch (listErr: unknown) {
+        const message =
+          listErr instanceof Error ? listErr.message : String(listErr);
+        // Room not created yet — proceed to createDispatch.
+        if (!message.includes("does not exist") && !message.includes("404")) {
+          throw listErr;
+        }
+      }
+
+      if (!hasCoach) {
+        await dispatchClient.createDispatch(room, AGENT_NAME, {
+          metadata: JSON.stringify({ participant: identity }),
+        });
+        console.log(`[token] Dispatched ${AGENT_NAME} to room: ${room}`);
+      } else {
+        console.log(
+          `[token] ${AGENT_NAME} already dispatched to room: ${room}`
+        );
+      }
+    } catch (dispatchErr: unknown) {
+      const message =
+        dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+      console.warn("[token] Agent dispatch warning:", message);
+      return NextResponse.json(
+        { error: `Agent dispatch failed: ${message}` },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json({ token, room });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-  

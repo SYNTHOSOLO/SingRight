@@ -20,7 +20,10 @@ const LIVEKIT_URL = process.env.NEXT_PUBLIC_LIVEKIT_URL ?? "";
 export default function HomePage() {
   const [serverUrl, setServerUrl] = useState(LIVEKIT_URL);
   const [token, setToken] = useState("");
-  const [isJoined, setIsJoined] = useState(false);
+  const [session, setSession] = useState<{
+    token: string;
+    serverUrl: string;
+  } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -44,10 +47,13 @@ export default function HomePage() {
 
     let activeToken = token.trim();
 
-    // If no token is provided in the input, auto-generate one from our API route
+    // Fresh room per session so stale agent dispatches never stack up.
+    const room = `coaching-${crypto.randomUUID().slice(0, 8)}`;
     if (!activeToken) {
       try {
-        const res = await fetch(`/api/token?room=coaching-room`);
+        const res = await fetch(
+          `/api/token?room=${encodeURIComponent(room)}`
+        );
         if (!res.ok) {
           const data = await res.json();
           throw new Error(data.error || "Failed to generate token");
@@ -62,14 +68,14 @@ export default function HomePage() {
       }
     }
 
-    setIsJoined(true);
+    setSession({ token: activeToken, serverUrl: serverUrl.trim() });
     setIsLoading(false);
   };
 
   // ── Connected: render the dashboard inside the LiveKit room ─────────
-  if (isJoined) {
+  if (session) {
     return (
-      <LiveKitProvider token={token} serverUrl={serverUrl}>
+      <LiveKitProvider token={session.token} serverUrl={session.serverUrl}>
         <VocalDashboard />
       </LiveKitProvider>
     );
