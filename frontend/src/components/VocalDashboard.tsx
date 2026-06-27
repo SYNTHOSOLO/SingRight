@@ -26,6 +26,8 @@ import {
   MessageSquare,
   Eye,
   EyeOff,
+  Guitar,
+  Piano,
 } from "lucide-react";
 import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
 import { useSongPlayback } from "@/hooks/useSongPlayback";
@@ -36,6 +38,13 @@ import { VOLUME_SILENCE_THRESHOLD_DB } from "@/lib/songs/pitch";
 import SyllableLyrics from "@/components/SyllableLyrics";
 import PitchContourChart from "@/components/PitchContourChart";
 import PerformanceIssues from "@/components/PerformanceIssues";
+import LiveSoundEnergy from "@/components/LiveSoundEnergy";
+import InstrumentNoteBoard from "@/components/InstrumentNoteBoard";
+import { hzToNoteName, type DemoInstrument } from "@/lib/audio/notes";
+import {
+  parsePlayRequest,
+  playRequestKey,
+} from "@/lib/audio/playRequestParser";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -180,6 +189,11 @@ export default function VocalDashboard() {
   const [isVolumeWarn, setIsVolumeWarn] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const [coachDemonstrating, setCoachDemonstrating] = useState(false);
+  const [demoNotes, setDemoNotes] = useState<string[]>([]);
+  const [demoActiveNote, setDemoActiveNote] = useState<string | null>(null);
+  const [demoInstrument, setDemoInstrument] = useState<DemoInstrument>("both");
+  const [instrumentFollowEnabled, setInstrumentFollowEnabled] = useState(false);
+  const [followInstrument, setFollowInstrument] = useState<DemoInstrument>("both");
 
   // Refs for interval / telemetry gating
   const metricsRef = useRef<VocalMetrics>({
@@ -205,7 +219,8 @@ export default function VocalDashboard() {
   coachingModeRef.current = coachingMode;
   const nonInterruptModeRef = useRef(nonInterruptMode);
   nonInterruptModeRef.current = nonInterruptMode;
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const transcriptScrollRef = useRef<HTMLDivElement>(null);
+  const karaokeTranscriptScrollRef = useRef<HTMLDivElement>(null);
   const visualCueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   isPausedRef.current = isPaused;
 
@@ -213,6 +228,9 @@ export default function VocalDashboard() {
   const smoothedRef = useRef({ volumeDb: -100, frequencyHz: 0 });
   const lastPitchAtRef = useRef(0);
   const lastDisplayFlushRef = useRef(0);
+
+  const lastPlayRequestRef = useRef<string>("");
+  const lastPlayRequestAtRef = useRef(0);
 
   const tonePlayer = useTonePlayer();
   const tonePlayerRef = useRef(tonePlayer);
@@ -275,17 +293,45 @@ export default function VocalDashboard() {
               setVisualCue(null);
             }, VISUAL_CUE_FADE_MS);
           }
+        } else if (action === "SHOW_NOTES") {
+          const rawNotes = parsed.notes as Array<{
+            note_name: string;
+            frequency_hz: number;
+            duration_ms?: number;
+          }>;
+          if (rawNotes?.length) {
+            const inst = (parsed.instrument as DemoInstrument) ?? "piano";
+            setDemoInstrument(inst);
+            setDemoNotes(rawNotes.map((n) => n.note_name));
+            setDemoActiveNote(rawNotes[0]?.note_name ?? null);
+            setCoachDemonstrating(true);
+            setCoachStatus("speaking");
+            setCoachNotes(
+              notes ?? `On the board: ${rawNotes.map((n) => n.note_name).join(", ")}`
+            );
+          }
         } else if (action === "PLAY_REFERENCE_TONE") {
           const hz = parsed.frequency_hz as number;
           const durationMs = (parsed.duration_ms as number) ?? 1200;
           const syllable = parsed.syllable as string | undefined;
+          const noteName =
+            (parsed.note_name as string) ||
+            (hz > 0 ? hzToNoteName(hz) : null) ||
+            "—";
+          if (!hz || hz <= 0) return;
+          const inst = (parsed.instrument as DemoInstrument) ?? "both";
+          setDemoInstrument(inst);
+          setDemoNotes(noteName !== "—" ? [noteName] : []);
+          setDemoActiveNote(noteName !== "—" ? noteName : null);
           setCoachDemonstrating(true);
           setCoachStatus("speaking");
           setCoachNotes(
-            notes ?? `Reference tone: ${syllable ?? ""} ${hz?.toFixed(0)} Hz`
+            notes ?? `Reference tone: ${syllable ?? noteName} ${hz?.toFixed(0)} Hz`
           );
-          void tonePlayerRef.current.playTone(hz, durationMs).then(() => {
+          void tonePlayerRef.current.playTone(hz, durationMs, inst).finally(() => {
             setCoachDemonstrating(false);
+            setDemoActiveNote(null);
+            setDemoNotes([]);
           });
         } else if (action === "PLAY_NOTE_SEQUENCE") {
           const rawNotes = parsed.notes as Array<{
@@ -294,18 +340,33 @@ export default function VocalDashboard() {
             duration_ms?: number;
           }>;
           if (rawNotes?.length) {
+            const validNotes = rawNotes.filter((n) => n.frequency_hz > 0);
+            if (!validNotes.length) return;
+            const inst = (parsed.instrument as DemoInstrument) ?? "both";
+            setDemoInstrument(inst);
+            setDemoNotes(validNotes.map((n) => n.note_name));
             setCoachDemonstrating(true);
             setCoachStatus("speaking");
-            const label = rawNotes.map((n) => n.note_name).join(" → ");
+            const label = validNotes.map((n) => n.note_name).join(" → ");
             setCoachNotes(notes ?? `Playing: ${label}`);
-            const events = rawNotes.map((n) => ({
+            const events = validNotes.map((n) => ({
               frequencyHz: n.frequency_hz,
               durationMs: n.duration_ms ?? 1200,
               syllable: n.note_name,
             }));
-            void tonePlayerRef.current.playSequence(events).then(() => {
-              setCoachDemonstrating(false);
-            });
+            void tonePlayerRef.current
+              .playSequence(
+                events,
+                (_i, event) => {
+                  setDemoActiveNote(event.syllable ?? null);
+                },
+                inst
+              )
+              .finally(() => {
+                setCoachDemonstrating(false);
+                setDemoActiveNote(null);
+                setDemoNotes([]);
+              });
           }
         } else if (action === "PLAY_LYRIC_LINE") {
           const lineIndex = parsed.line_index as number;
@@ -510,8 +571,48 @@ export default function VocalDashboard() {
     !allowAgentSpeech;
   useAgentAudioMute(agentAudioMuted);
 
+  // Detect "play G3 on piano" in student speech → direct backend execution
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!isConnected || !isActive || !latestStudentText) return;
+
+    const request = parsePlayRequest(latestStudentText);
+    if (!request) return;
+
+    const key = playRequestKey(request);
+    const now = Date.now();
+    if (
+      key === lastPlayRequestRef.current &&
+      now - lastPlayRequestAtRef.current < 4000
+    ) {
+      return;
+    }
+    lastPlayRequestRef.current = key;
+    lastPlayRequestAtRef.current = now;
+
+    const sendFn = sendTelemetryRef.current;
+    if (!sendFn) return;
+
+    const packet = JSON.stringify({
+      type: "USER_PLAY_REQUEST",
+      pitch: request.pitch,
+      instrument: request.instrument,
+    });
+    void sendFn(new TextEncoder().encode(packet), { reliable: true });
+  }, [latestStudentText, isConnected, isActive]);
+
+  useEffect(() => {
+    const scrollContainerToBottom = (container: HTMLDivElement | null) => {
+      if (!container) return;
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      // Only scroll the transcript panel — never the page — and only if already near bottom.
+      if (distanceFromBottom < 80) {
+        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+      }
+    };
+
+    scrollContainerToBottom(transcriptScrollRef.current);
+    scrollContainerToBottom(karaokeTranscriptScrollRef.current);
   }, [transcriptLines]);
 
   useEffect(() => {
@@ -613,6 +714,44 @@ export default function VocalDashboard() {
   }, [nonInterruptMode, isConnected, sendTelemetry]);
 
   useEffect(() => {
+    if (!isConnected) return;
+    const packet = JSON.stringify({
+      type: "INSTRUMENT_FOLLOW",
+      enabled: instrumentFollowEnabled,
+      instrument: followInstrument,
+    });
+    sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+  }, [instrumentFollowEnabled, followInstrument, isConnected, sendTelemetry]);
+
+  useEffect(() => {
+    tonePlayer.setInstrumentFollow(
+      instrumentFollowEnabled && isActive && !coachDemonstrating,
+      followInstrument
+    );
+  }, [
+    instrumentFollowEnabled,
+    followInstrument,
+    isActive,
+    coachDemonstrating,
+    tonePlayer,
+  ]);
+
+  useEffect(() => {
+    if (!instrumentFollowEnabled || !isActive || coachDemonstrating) return;
+    tonePlayer.updateInstrumentFollow(
+      displayMetrics.frequencyHz,
+      displayMetrics.isVoiced,
+      displayMetrics.pitchConfidence
+    );
+  }, [
+    displayMetrics,
+    instrumentFollowEnabled,
+    isActive,
+    coachDemonstrating,
+    tonePlayer,
+  ]);
+
+  useEffect(() => {
     if (coachingMode === "conversational") {
       setNonInterruptMode(true);
     } else {
@@ -646,6 +785,12 @@ export default function VocalDashboard() {
       : 0;
   const pitchDeltaCents =
     coachingMode === "karaoke" ? syllableTracker.pitchDeltaCents : 0;
+  const liveNote =
+    displayMetrics.isVoiced && displayMetrics.noteName !== "—"
+      ? displayMetrics.noteName
+      : null;
+  const targetNote =
+    targetPitchHz > 0 ? hzToNoteName(targetPitchHz) : null;
 
   const sendCriticalError = useCallback(
     (
@@ -712,6 +857,8 @@ export default function VocalDashboard() {
       await localParticipant.setMicrophoneEnabled(false);
       songPlayback.stop();
       stop();
+      tonePlayer.setInstrumentFollow(false);
+      setInstrumentFollowEnabled(false);
       setSessionElapsed(0);
       sentSyllableResultsRef.current = 0;
       setMicError(null);
@@ -740,7 +887,7 @@ export default function VocalDashboard() {
         err instanceof Error ? err.message : "Failed to start microphone."
       );
     }
-  }, [isActive, songPlayback, stop, localParticipant, start, coachingMode]);
+  }, [isActive, songPlayback, stop, tonePlayer, localParticipant, start, coachingMode]);
 
   // Start/stop reference audio when coaching mode changes mid-session
   useEffect(() => {
@@ -963,7 +1110,10 @@ export default function VocalDashboard() {
                   </p>
                 )}
 
-                <div className="flex max-h-[180px] flex-col gap-2 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800">
+                <div
+                  ref={transcriptScrollRef}
+                  className="flex max-h-[180px] flex-col gap-2 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800"
+                >
                   {transcriptLines.length === 0 ? (
                     <p className="text-sm italic text-[var(--color-text-muted)]">
                       {isActive
@@ -991,7 +1141,6 @@ export default function VocalDashboard() {
                       </div>
                     ))
                   )}
-                  <div ref={transcriptEndRef} />
                 </div>
 
                 <div className="flex flex-wrap gap-3 pt-1">
@@ -1109,7 +1258,10 @@ export default function VocalDashboard() {
                   Live Transcription Stream
                 </h2>
               </div>
-              <div className="flex flex-col gap-2 max-h-[120px] overflow-y-auto px-5 py-4 scrollbar-thin scrollbar-thumb-zinc-800">
+              <div
+                ref={karaokeTranscriptScrollRef}
+                className="flex max-h-[120px] flex-col gap-2 overflow-y-auto px-5 py-4 scrollbar-thin scrollbar-thumb-zinc-800"
+              >
                 {transcriptLines.length === 0 ? (
                   <p className="text-sm italic text-[var(--color-text-muted)]">
                     No speech detected yet.
@@ -1138,6 +1290,81 @@ export default function VocalDashboard() {
 
         {/* ── Right column: Telemetry + Controls ──────────────────────── */}
         <div className="flex flex-col gap-6">
+          <LiveSoundEnergy
+            metrics={displayMetrics}
+            targetNote={targetNote}
+            isActive={isActive}
+          />
+
+          <InstrumentNoteBoard
+            liveNote={liveNote}
+            targetNote={targetNote}
+            demoNotes={demoNotes}
+            demoActiveNote={demoActiveNote}
+            instrument={
+              instrumentFollowEnabled ? followInstrument : demoInstrument
+            }
+            coachDemonstrating={coachDemonstrating}
+          />
+
+          {/* Instrument follow toggle */}
+          <section className="glass-card overflow-hidden">
+            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+              <Guitar className="h-4 w-4 text-amber-400" />
+              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                Instrument Mirror
+              </h2>
+              <button
+                type="button"
+                disabled={!isActive}
+                onClick={() => setInstrumentFollowEnabled((v) => !v)}
+                className={`ml-auto rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-40 ${
+                  instrumentFollowEnabled
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : "bg-white/5 text-[var(--color-text-muted)] border border-white/10"
+                }`}
+              >
+                {instrumentFollowEnabled ? "On" : "Off"}
+              </button>
+            </div>
+            <div className="space-y-3 px-5 py-4">
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Mirror your sung pitch as live piano/guitar simulation. Turn on
+                before singing — coach samples also use this sound.
+              </p>
+              <div className="flex rounded-full bg-white/5 p-0.5 border border-white/5">
+                {(
+                  [
+                    ["piano", "Piano", Piano],
+                    ["guitar", "Guitar", Guitar],
+                    ["both", "Both", Music],
+                  ] as const
+                ).map(([id, label, Icon]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    disabled={!isActive}
+                    onClick={() => setFollowInstrument(id)}
+                    className={`flex flex-1 items-center justify-center gap-1 rounded-full px-2 py-1.5 text-[10px] font-semibold transition disabled:opacity-40 ${
+                      followInstrument === id
+                        ? "bg-violet-600 text-white"
+                        : "text-[var(--color-text-muted)]"
+                    }`}
+                  >
+                    <Icon className="h-3 w-3" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {instrumentFollowEnabled && isActive && displayMetrics.isVoiced && (
+                <p className="text-center text-xs text-cyan-400">
+                  Mirroring {displayMetrics.noteName.replace("#", "♯")} on{" "}
+                  {followInstrument}
+                </p>
+              )}
+            </div>
+          </section>
+
           {/* Volume gauge */}
           <section className="glass-card overflow-hidden">
             <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
