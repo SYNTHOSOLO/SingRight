@@ -13,10 +13,24 @@ export function parsePlayRequest(text: string): PlayRequest | null {
   if (!trimmed) return null;
 
   const hasPlayIntent =
-    /\b(play|sample|demonstrate|hear|show\s+(?:me\s+)?(?:the\s+)?(?:note|pitch))\b/i.test(
+    /\b(play|sample|demonstrate|hear|show\s+(?:me\s+)?(?:the\s+)?(?:note|pitch|chord))\b/i.test(
       trimmed
     );
   if (!hasPlayIntent) return null;
+
+  const chordMatch = trimmed.match(
+    /\b(?:play|hear|sample|demonstrate)\s+(?:the\s+)?(?:a\s+)?([A-G](?:#|b|♯|♭)?(?:maj7|min7|maj|min|dim|aug|m7|7|m)?)\s+chord\b/i
+  );
+  if (chordMatch?.[1]) {
+    const pitch = chordMatch[1].replace(/♯/g, "#").replace(/♭/g, "b");
+    let instrument: DemoInstrument = "piano";
+    const hasPiano = /\bpiano\b/i.test(trimmed);
+    const hasGuitar = /\bguitar\b/i.test(trimmed);
+    if (hasPiano && hasGuitar) instrument = "both";
+    else if (hasGuitar) instrument = "guitar";
+    else if (hasPiano) instrument = "piano";
+    return { pitch: `${pitch} chord`, instrument };
+  }
 
   let instrument: DemoInstrument = "piano";
   const hasPiano = /\bpiano\b/i.test(trimmed);

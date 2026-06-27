@@ -1,9 +1,26 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import LiveKitProvider from "@/components/LiveKitProvider";
-import VocalDashboard from "@/components/VocalDashboard";
-import { Headphones, Loader2, ArrowRight } from "lucide-react";
+import dynamic from "next/dynamic";
+import { Loader2, ArrowRight } from "lucide-react";
+import { Logo } from "@/components/Logo";
+
+const LiveKitProvider = dynamic(
+  () => import("@/components/LiveKitProvider"),
+  { ssr: false }
+);
+
+const VocalDashboard = dynamic(
+  () => import("@/components/VocalDashboard"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-dvh items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-violet-400" />
+      </div>
+    ),
+  }
+);
 
 // ---------------------------------------------------------------------------
 // In production, you would fetch a token from your own backend endpoint.
@@ -87,12 +104,15 @@ export default function HomePage() {
       <div className="glass-card glow-violet w-full max-w-md p-8">
         {/* Logo / brand */}
         <div className="mb-8 flex flex-col items-center gap-3">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-600 to-fuchsia-600 shadow-lg shadow-violet-600/30">
-            <Headphones className="h-7 w-7 text-white" />
+          <Logo className="h-14 w-14" priority />
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <h1 className="text-2xl font-extrabold tracking-tight text-white">
+              AI Vocal Coach
+            </h1>
+            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider text-amber-300">
+              Beta
+            </span>
           </div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-white">
-            AI Vocal Coach
-          </h1>
           <p className="text-center text-sm text-[var(--color-text-muted)]">
             Connect to your LiveKit room to begin a real-time coaching session.
           </p>

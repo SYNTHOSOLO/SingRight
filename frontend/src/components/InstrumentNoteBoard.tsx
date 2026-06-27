@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Guitar, Piano } from "lucide-react";
 import {
   type DemoInstrument,
@@ -18,6 +18,7 @@ interface InstrumentNoteBoardProps {
   demoActiveNote?: string | null;
   instrument?: DemoInstrument;
   coachDemonstrating?: boolean;
+  className?: string;
 }
 
 type BoardTab = "piano" | "guitar";
@@ -51,9 +52,9 @@ function PianoBoard({
   const whiteKeys = keys.filter((k) => !k.isBlack);
 
   return (
-    <div className="overflow-x-auto pb-1">
-      <div className="relative min-w-[320px]">
-        <div className="flex h-24 items-end gap-px">
+    <div className="overflow-x-auto">
+      <div className="relative min-w-[280px]">
+        <div className="flex h-[4.5rem] items-end gap-px">
           {whiteKeys.map((key) => {
             const isLive = liveMidis.has(key.midi);
             const isTarget = targetMidis.has(key.midi);
@@ -68,14 +69,14 @@ function PianoBoard({
             return (
               <div
                 key={key.midi}
-                className={`relative flex h-full min-w-[22px] flex-1 flex-col items-center justify-end rounded-b-md border border-zinc-400/30 pb-1 ${bg} transition-colors duration-100`}
+                className={`relative flex h-full min-w-[24px] flex-1 flex-col items-center justify-end rounded-b-md border border-zinc-400/30 pb-1 ${bg} transition-colors duration-100`}
               >
                 <span className="text-[9px] font-bold text-zinc-700">{label}</span>
               </div>
             );
           })}
         </div>
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex h-14 items-start">
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex h-12 items-start">
           {keys.map((key) => {
             if (!key.isBlack) return null;
             const whiteIndex = keys
@@ -101,12 +102,6 @@ function PianoBoard({
           })}
         </div>
       </div>
-      <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)]">
-        C3 – C5 ·{" "}
-        <span className="text-cyan-400">■ you</span>{" "}
-        <span className="text-amber-400">■ target</span>{" "}
-        <span className="text-fuchsia-400">■ demo</span>
-      </p>
     </div>
   );
 }
@@ -142,9 +137,9 @@ function GuitarBoard({
   }, [liveMidis, targetMidis, demoActiveMidis]);
 
   return (
-    <div className="overflow-x-auto pb-1">
-      <div className="min-w-[300px] rounded-lg border border-amber-900/40 bg-gradient-to-b from-amber-950/60 to-amber-900/30 p-3">
-        <div className="grid gap-1">
+    <div className="overflow-x-auto">
+      <div className="min-w-[280px] rounded-lg border border-amber-900/40 bg-gradient-to-b from-amber-950/60 to-amber-900/30 p-3">
+        <div className="grid gap-0.5">
           {GUITAR_OPEN_MIDI.map((openMidi, stringIndex) => (
             <div key={stringIndex} className="flex items-center gap-2">
               <span className="w-4 text-center text-[10px] font-bold text-amber-200/80">
@@ -168,7 +163,7 @@ function GuitarBoard({
                   return (
                     <div
                       key={fret}
-                      className="relative flex h-7 flex-1 items-center justify-center border-r border-amber-700/50 last:border-r-0"
+                      className="relative flex h-8 flex-1 items-center justify-center border-r border-amber-700/50 last:border-r-0"
                     >
                       {fret > 0 && fret % 3 === 0 && stringIndex === 2 && (
                         <span className="pointer-events-none absolute -top-3 text-[8px] text-amber-500/60">
@@ -195,9 +190,6 @@ function GuitarBoard({
           ))}
         </div>
       </div>
-      <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)]">
-        Standard tuning · frets 0–12
-      </p>
     </div>
   );
 }
@@ -209,6 +201,7 @@ export default function InstrumentNoteBoard({
   demoActiveNote,
   instrument = "both",
   coachDemonstrating = false,
+  className = "",
 }: InstrumentNoteBoardProps) {
   const [tab, setTab] = useState<BoardTab>(
     instrument === "guitar" ? "guitar" : "piano"
@@ -227,13 +220,21 @@ export default function InstrumentNoteBoard({
   const demoLabel =
     demoActiveNote ?? (demoNotes.length ? demoNotes.join(" → ") : null);
 
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   return (
-    <section className="glass-card overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-        <Piano className="h-4 w-4 text-violet-400" />
-        <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+    <section className={`glass-card shrink-0 overflow-hidden ${className}`}>
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-1.5">
+        <Piano className="h-3.5 w-3.5 text-violet-400" />
+        <h2 className="text-xs font-semibold text-[var(--color-text-secondary)]">
           Note Board
         </h2>
+        <span className="hidden text-[9px] text-[var(--color-text-muted)] sm:inline">
+          <span className="text-cyan-400">■</span> you{" "}
+          <span className="text-amber-400">■</span> target{" "}
+          <span className="text-fuchsia-400">■</span> demo
+        </span>
         {showPiano && showGuitar && (
           <div className="ml-auto flex rounded-full bg-white/5 p-0.5">
             <button
@@ -262,16 +263,16 @@ export default function InstrumentNoteBoard({
         )}
       </div>
 
-      <div className="px-5 py-4">
+      <div className="px-3 py-2.5">
         {coachDemonstrating && demoLabel && (
-          <p className="mb-3 rounded-lg bg-fuchsia-500/10 px-3 py-2 text-center text-xs text-fuchsia-300">
+          <p className="mb-1.5 rounded-md bg-fuchsia-500/10 px-2 py-0.5 text-center text-[10px] text-fuchsia-300">
             <Guitar className="mr-1 inline h-3 w-3" />
             Coach demo: <strong>{demoLabel.replace(/#/g, "♯")}</strong>
           </p>
         )}
 
         {!coachDemonstrating && liveNote && liveNote !== "—" && (
-          <p className="mb-3 text-center text-xs text-cyan-400">
+          <p className="mb-1.5 text-center text-[10px] text-cyan-400">
             Singing: <strong>{liveNote.replace("#", "♯")}</strong>
           </p>
         )}
@@ -298,11 +299,11 @@ export default function InstrumentNoteBoard({
           />
         ) : null}
 
-        {demoNotes.length > 0 && (
-          <div className="mt-3 flex flex-wrap justify-center gap-1.5">
-            {demoNotes.map((n) => (
+        {mounted && demoNotes.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap justify-center gap-1">
+            {demoNotes.map((n, idx) => (
               <span
-                key={n}
+                key={`${n}-${idx}`}
                 className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                   normalizeNote(n) === normalizeNote(demoActiveNote)
                     ? "bg-fuchsia-500/30 text-fuchsia-200 ring-1 ring-fuchsia-400"

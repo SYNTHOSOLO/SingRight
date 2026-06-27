@@ -37,5 +37,5 @@ export function nearestOctaveCentsDeviation(actualHz: number, expectedHz: number
 export const PITCH_WARN_CENTS = 50;
 export const PITCH_CLEAR_CENTS = 35;
 export const PITCH_MAJOR_CENTS = 80;
-export const VOLUME_SILENCE_THRESHOLD_DB = -60;
-export const SYLLABLE_VOICED_RATIO = 0.3;
+export const VOLUME_SILENCE_THRESHOLD_DB = -70;
+export const SYLLABLE_VOICED_RATIO = 0.2;

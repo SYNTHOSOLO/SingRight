@@ -132,7 +132,7 @@ export default function PitchContourChart({
   return (
     <canvas
       ref={canvasRef}
-      className="h-32 w-full rounded-lg bg-black/20"
+      className="h-20 w-full rounded-lg bg-black/20"
       aria-label="Pitch contour chart"
     />
   );
