@@ -51,13 +51,16 @@ class VocalCoachAgent(Agent):
     SYSTEM_INSTRUCTIONS = (
         "You are an expert AI vocal coach conducting a live singing lesson. "
         "You listen to the student's voice in real time and receive continuous "
-        "vocal telemetry (volume in dB and pitch in Hz). "
+        "vocal telemetry (volume in dB, pitch in Hz, and syllable-level accuracy "
+        "when they are singing a notated song). "
         "Your job is to:\n"
         "1. Provide encouraging, specific feedback on pitch accuracy, breath "
-        "control, and volume consistency.\n"
+        "control, and volume consistency — reference the current syllable when "
+        "telemetry includes one.\n"
         "2. If you detect a critical vocal fault (volume dropping to silence "
-        "or pitch going wildly off target), IMMEDIATELY interrupt, explain "
-        "what went wrong, and guide the student to correct it.\n"
+        "or pitch going off the expected note for the active syllable), "
+        "IMMEDIATELY interrupt, explain what went wrong, and guide the student "
+        "to correct it.\n"
         "3. Use the `control_session_playback` tool to pause or resume the "
         "backing track and show coaching tips in the UI.\n"
         "4. Keep your spoken responses concise and warm — you are coaching, "
@@ -128,6 +131,44 @@ async def entrypoint(ctx: JobContext) -> None:
     last_telemetry_at = 0.0
     telemetry_lock = asyncio.Lock()
     coaching_mode = "karaoke"
+    current_song: dict | None = None
+
+    async def inject_song_context(song: dict) -> None:
+        nonlocal current_song
+        current_song = song
+        songname = song.get("songname", "Unknown")
+        tempo = song.get("tempo", "")
+        excerpt = song.get("lyric_excerpt", "")
+        song_context = (
+            f"[SONG SELECTED] The student is practicing \"{songname}\" "
+            f"at {tempo} BPM. Opening lyric: \"{excerpt}\". "
+            "You will receive syllable-level pitch results as they sing."
+        )
+        chat_ctx = agent.chat_ctx.copy()
+        chat_ctx.add_message(role="system", content=song_context)
+        await agent.update_chat_ctx(chat_ctx)
+        logger.info("Song context set: %s", songname)
+
+    async def inject_syllable_result(result: dict) -> None:
+        syllable = result.get("syllable", "?")
+        issue = result.get("issue", "unknown")
+        cents = result.get("pitch_error_cents", 0)
+        if issue == "ok":
+            note = f"[SYLLABLE OK] Student sang '{syllable}' on pitch."
+        elif issue == "sharp":
+            note = f"[SYLLABLE SHARP] Student sang '{syllable}' {abs(cents):.0f} cents sharp."
+        elif issue == "flat":
+            note = f"[SYLLABLE FLAT] Student sang '{syllable}' {abs(cents):.0f} cents flat."
+        elif issue == "quiet":
+            note = f"[SYLLABLE QUIET] Student sang '{syllable}' too quietly."
+        elif issue == "missed":
+            note = f"[SYLLABLE MISSED] No clear pitch detected on '{syllable}'."
+        else:
+            note = f"[SYLLABLE] '{syllable}' issue: {issue}."
+
+        chat_ctx = agent.chat_ctx.copy()
+        chat_ctx.add_message(role="system", content=note)
+        await agent.update_chat_ctx(chat_ctx)
 
     async def inject_telemetry(metrics: dict) -> None:
         nonlocal last_telemetry_at
@@ -143,23 +184,32 @@ async def entrypoint(ctx: JobContext) -> None:
             volume_db = metrics.get("volume_db", 0)
             pitch_hz = metrics.get("pitch_hz", 0)
             mode = metrics.get("coaching_mode", coaching_mode)
+            syllable = metrics.get("syllable")
+            expected_hz = metrics.get("expected_pitch_hz")
+            delta_cents = metrics.get("pitch_delta_cents")
+            on_pitch = metrics.get("on_pitch")
 
-            telemetry_context = (
-                f"[LIVE TELEMETRY — {mode} mode] Student vocal snapshot — "
-                f"Volume: {volume_db:.1f} dB, Pitch: {pitch_hz:.1f} Hz."
-            )
+            parts = [
+                f"[LIVE TELEMETRY — {mode} mode]",
+                f"Volume: {volume_db:.1f} dB, Pitch: {pitch_hz:.1f} Hz",
+            ]
+            if syllable:
+                parts.append(f"Syllable: {syllable}")
+            if expected_hz:
+                parts.append(f"Expected: {expected_hz:.1f} Hz")
+            if delta_cents is not None and pitch_hz > 0:
+                parts.append(f"Delta: {delta_cents:.0f} cents")
+            if on_pitch is not None:
+                parts.append(f"On pitch: {on_pitch}")
+
+            telemetry_context = ". ".join(parts) + "."
 
             chat_ctx = agent.chat_ctx.copy()
             chat_ctx.add_message(role="system", content=telemetry_context)
             await agent.update_chat_ctx(chat_ctx)
 
             last_telemetry_at = now
-            logger.debug(
-                "Injected telemetry: vol=%.1f dB, pitch=%.1f Hz, mode=%s",
-                volume_db,
-                pitch_hz,
-                mode,
-            )
+            logger.debug("Injected telemetry: %s", telemetry_context)
 
     @ctx.room.on("data_received")
     def _on_data_received(packet: rtc.DataPacket) -> None:
@@ -174,6 +224,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
         if msg_type == "VOCAL_METRICS":
             asyncio.create_task(inject_telemetry(message))
+        elif msg_type == "SONG_SELECTED":
+            asyncio.create_task(inject_song_context(message))
+        elif msg_type == "SYLLABLE_RESULT":
+            asyncio.create_task(inject_syllable_result(message))
         elif msg_type == "COACHING_MODE":
             nonlocal coaching_mode
             coaching_mode = message.get("mode", coaching_mode)
@@ -198,9 +252,10 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.generate_reply(
         instructions=(
             "Greet the student warmly. Introduce yourself as their AI vocal "
-            "coach. Let them know you'll be monitoring their pitch and volume "
-            "in real time and will jump in with tips whenever needed. "
-            "Ask them to start singing whenever they're ready."
+            "coach. Let them know they'll be singing the Alphabet song with "
+            "lyrics on screen, and you'll monitor their pitch syllable by "
+            "syllable and jump in with tips whenever needed. "
+            "Ask them to press Start Session and sing along when ready."
         )
     )
     logger.info("Agent session started for participant %s", participant.identity)
@@ -231,9 +286,9 @@ async def _handle_request_feedback(session: AgentSession, ctx: JobContext) -> No
     await session.generate_reply(
         instructions=(
             "The student has completed their singing performance and requested feedback. "
-            "Analyze the vocal metrics (volume in dB and pitch in Hz) from the conversation history. "
-            "Give them a constructive, encouraging verbal critique. "
-            "State what went well and name one target improvement detail."
+            "Review the syllable-level results and live telemetry from the conversation history. "
+            "Name specific syllables that were sharp, flat, quiet, or missed, and what went well. "
+            "Give a constructive, encouraging verbal critique with one clear target improvement."
         )
     )
 
@@ -254,15 +309,23 @@ async def _handle_critical_error(
     3. Force the model to deliver an immediate spoken correction.
     """
     reason = error.get("reason", "UNKNOWN_FAULT")
-    logger.warning("CRITICAL VOCAL ERROR received: %s", reason)
+    syllable = error.get("syllable")
+    expected_hz = error.get("expected_hz")
+    actual_hz = error.get("actual_hz")
+    logger.warning(
+        "CRITICAL VOCAL ERROR received: %s (syllable=%s)", reason, syllable
+    )
 
     # 1 ▸ Interrupt current agent output
     session.interrupt()
 
     # 2 ▸ Pause the client-side track immediately
+    coach_note = f"Critical issue: {reason}"
+    if syllable:
+        coach_note += f" on syllable '{syllable}'"
     pause_directive = json.dumps({
         "action": "PAUSE_TRACK",
-        "coach_notes": f"Critical issue detected: {reason}. Pausing for correction.",
+        "coach_notes": coach_note + ". Pausing for correction.",
     })
     await ctx.room.local_participant.publish_data(
         payload=pause_directive.encode("utf-8"),
@@ -283,6 +346,16 @@ async def _handle_critical_error(
             "Immediately interrupt, tell them their pitch went sharp/flat, "
             "guide them to drop or raise by roughly half a step, and ask "
             "them to retry the phrase slowly."
+        ),
+        "PITCH_OFF_TARGET": (
+            f"The student's pitch is off target on syllable '{syllable or 'unknown'}'. "
+            f"Expected around {expected_hz:.0f} Hz but heard {actual_hz:.0f} Hz. "
+            "Immediately interrupt, tell them whether they are sharp or flat, "
+            "name the syllable if known, and guide them to match the reference pitch."
+            if syllable and expected_hz and actual_hz
+            else "The student's pitch is off target for the current syllable. "
+            "Immediately interrupt, tell them whether they are sharp or flat, "
+            "and guide them to match the reference pitch on the active syllable."
         ),
     }
 

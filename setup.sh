@@ -28,4 +28,14 @@ echo "📦 Installing frontend npm dependencies..."
 npm install
 echo "✅ Frontend dependencies installed."
 
+# Link reference audio for karaoke playback
+echo "🎵 Linking alphabet test audio..."
+mkdir -p "$DIR/frontend/public/songs"
+if [ -f "$DIR/alphabet_data/wav/en001a.wav" ]; then
+    ln -sf "$DIR/alphabet_data/wav/en001a.wav" "$DIR/frontend/public/songs/en001a.wav"
+    echo "✅ Linked en001a.wav to frontend/public/songs/"
+else
+    echo "⚠️  alphabet_data/wav/en001a.wav not found — skip audio link."
+fi
+
 echo "🎉 Setup complete! Use the run scripts to start the application."

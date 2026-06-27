@@ -19,7 +19,13 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
-import { useKaraokeBackingTrack } from "@/hooks/useKaraokeBackingTrack";
+import { useSongPlayback } from "@/hooks/useSongPlayback";
+import { useSyllableTracker } from "@/hooks/useSyllableTracker";
+import { SONG_EN001A } from "@/lib/songs/en001a";
+import { VOLUME_SILENCE_THRESHOLD_DB } from "@/lib/songs/pitch";
+import SyllableLyrics from "@/components/SyllableLyrics";
+import PitchContourChart from "@/components/PitchContourChart";
+import PerformanceIssues from "@/components/PerformanceIssues";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,27 +33,13 @@ import { useKaraokeBackingTrack } from "@/hooks/useKaraokeBackingTrack";
 
 const TELEMETRY_INTERVAL_MS = 250; // how often we send metrics to the agent
 const DISPLAY_UPDATE_MS = 100; // throttle UI meter updates to reduce flicker
-const VOLUME_SILENCE_THRESHOLD_DB = -60;
-const VOLUME_WARN_CLEAR_DB = -55; // hysteresis: clear warn above this
-const PITCH_DEVIATION_HZ = 200; // deviation from target that triggers error
-const PITCH_WARN_CLEAR_HZ = 180; // hysteresis: clear warn below this
-const PITCH_HOLD_MS = 250; // keep last pitch briefly when detection drops out
-const METRIC_SMOOTHING = 0.35; // EMA factor for displayed values (0–1)
+const VOLUME_WARN_CLEAR_DB = -55;
+const PITCH_HOLD_MS = 250;
+const METRIC_SMOOTHING = 0.35;
 const AUTO_FAULT_COOLDOWN_MS = 5000;
 const AUTO_FAULT_DELAY_MS = 1500;
 
-/** Sample lyrics for the karaoke display. */
-const LYRICS = [
-  { time: 0, text: "🎵  Take a deep breath…" },
-  { time: 4, text: "Feel the rhythm in your chest" },
-  { time: 8, text: "Let the melody rise" },
-  { time: 12, text: "Through the night skies" },
-  { time: 16, text: "Sing with all your heart" },
-  { time: 20, text: "Every note a brand-new start" },
-  { time: 24, text: "Hold the final tone…  🎶" },
-];
-
-const TARGET_PITCH_HZ = 440; // A4
+const ACTIVE_SONG = SONG_EN001A;
 
 // ---------------------------------------------------------------------------
 // Helper: clamp a value to a 0 – 100 percentage
@@ -84,7 +76,6 @@ export default function VocalDashboard() {
   const [coachStatus, setCoachStatus] = useState<
     "idle" | "speaking" | "paused"
   >("idle");
-  const [currentLyricIdx, setCurrentLyricIdx] = useState(0);
   const [sessionElapsed, setSessionElapsed] = useState(0);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [displayMetrics, setDisplayMetrics] = useState<VocalMetrics>({
@@ -92,11 +83,19 @@ export default function VocalDashboard() {
     frequencyHz: 0,
   });
   const [isVolumeWarn, setIsVolumeWarn] = useState(false);
-  const [isPitchWarn, setIsPitchWarn] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
 
   // Refs for interval / telemetry gating
   const metricsRef = useRef<VocalMetrics>({ volumeDb: -100, frequencyHz: 0 });
+  const trackerRef = useRef({
+    activeSyllableToken: null as string | null,
+    expectedPitchHz: 0,
+    pitchDeltaCents: 0,
+    isOnPitch: false,
+    isPitchWarn: false,
+    elapsedSec: 0,
+  });
+  const sentSyllableResultsRef = useRef(0);
   const isPausedRef = useRef(false);
   const lastAutoFaultRef = useRef(0);
   const coachingModeRef = useRef(coachingMode);
@@ -139,7 +138,8 @@ export default function VocalDashboard() {
   const { send: sendData } = useDataChannel("session_control", onDataReceived);
   const { send: sendTelemetry } = useDataChannel("telemetry");
 
-  const backingTrack = useKaraokeBackingTrack({
+  const songPlayback = useSongPlayback({
+    src: ACTIVE_SONG.audioSrc,
     enabled: coachingMode === "karaoke",
     isPaused,
   });
@@ -187,23 +187,31 @@ export default function VocalDashboard() {
       if (prev && displayVolume >= VOLUME_WARN_CLEAR_DB) return false;
       return prev;
     });
-
-    const deviation =
-      displayPitch > 0 ? Math.abs(displayPitch - TARGET_PITCH_HZ) : 0;
-    setIsPitchWarn((prev) => {
-      if (!prev && deviation > PITCH_DEVIATION_HZ && displayPitch > 0) {
-        return true;
-      }
-      if (prev && (deviation < PITCH_WARN_CLEAR_HZ || displayPitch === 0)) {
-        return false;
-      }
-      return prev;
-    });
   }, []);
 
   const { isActive, analyserNode, error: analyzerError, start, stop } = useVocalAnalyzer({
     onMetricsUpdate,
   });
+
+  const syllableTracker = useSyllableTracker({
+    song: ACTIVE_SONG,
+    elapsedSec: sessionElapsed,
+    livePitchHz: displayMetrics.frequencyHz,
+    volumeDb: displayMetrics.volumeDb,
+    enabled: isActive && coachingMode === "karaoke",
+  });
+
+  const isPitchWarn =
+    coachingMode === "karaoke" ? syllableTracker.isPitchWarn : false;
+
+  trackerRef.current = {
+    activeSyllableToken: syllableTracker.activeSyllable?.token ?? null,
+    expectedPitchHz: syllableTracker.expectedPitchHz,
+    pitchDeltaCents: syllableTracker.pitchDeltaCents,
+    isOnPitch: syllableTracker.isOnPitch,
+    isPitchWarn,
+    elapsedSec: sessionElapsed,
+  };
 
   useEffect(() => {
     if (isActive) return;
@@ -212,7 +220,6 @@ export default function VocalDashboard() {
     lastDisplayFlushRef.current = 0;
     setDisplayMetrics({ volumeDb: -100, frequencyHz: 0 });
     setIsVolumeWarn(false);
-    setIsPitchWarn(false);
   }, [isActive]);
 
   // ── Canvas Waveform Visualizer ─────────────────────────────────────────
@@ -285,11 +292,18 @@ export default function VocalDashboard() {
       if (isPausedRef.current) return;
 
       const m = metricsRef.current;
+      const t = trackerRef.current;
       const packet = JSON.stringify({
         type: "VOCAL_METRICS",
         volume_db: m.volumeDb,
         pitch_hz: m.frequencyHz,
         coaching_mode: coachingModeRef.current,
+        song_id: ACTIVE_SONG.id,
+        elapsed_sec: t.elapsedSec,
+        syllable: t.activeSyllableToken,
+        expected_pitch_hz: t.expectedPitchHz || null,
+        pitch_delta_cents: t.pitchDeltaCents,
+        on_pitch: t.isOnPitch,
       });
 
       sendTelemetry(new TextEncoder().encode(packet), { reliable: false });
@@ -298,6 +312,50 @@ export default function VocalDashboard() {
     return () => clearInterval(id);
   }, [isConnected, isActive, sendTelemetry]);
 
+  // ── Send song context when session starts ─────────────────────────────
+  useEffect(() => {
+    if (!isConnected || !isActive || coachingMode !== "karaoke") return;
+
+    const packet = JSON.stringify({
+      type: "SONG_SELECTED",
+      song_id: ACTIVE_SONG.id,
+      songname: ACTIVE_SONG.metadata.songname,
+      tempo: ACTIVE_SONG.metadata.tempo,
+      time_signature: ACTIVE_SONG.metadata.time_signature,
+      lyric_excerpt: ACTIVE_SONG.lyricLines[0],
+    });
+    sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+    sentSyllableResultsRef.current = 0;
+  }, [isConnected, isActive, coachingMode, sendTelemetry]);
+
+  // ── Send syllable results as they complete ────────────────────────────
+  useEffect(() => {
+    if (!isConnected || !isActive) return;
+
+    const results = syllableTracker.completedResults;
+    if (results.length <= sentSyllableResultsRef.current) return;
+
+    const newResults = results.slice(sentSyllableResultsRef.current);
+    sentSyllableResultsRef.current = results.length;
+
+    for (const result of newResults) {
+      const packet = JSON.stringify({
+        type: "SYLLABLE_RESULT",
+        song_id: ACTIVE_SONG.id,
+        syllable: result.token,
+        issue: result.issue,
+        pitch_error_cents: result.pitchErrorCents,
+        timing_offset_ms: result.timingOffsetMs,
+      });
+      sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+    }
+  }, [
+    isConnected,
+    isActive,
+    syllableTracker.completedResults,
+    sendTelemetry,
+  ]);
+
   // ── Notify agent of coaching mode changes ─────────────────────────────
   useEffect(() => {
     if (!isConnected) return;
@@ -305,37 +363,38 @@ export default function VocalDashboard() {
     sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
   }, [coachingMode, isConnected, sendTelemetry]);
 
-  // ── Lyric timer synced to backing track (karaoke) or wall clock ───────
+  // ── Lyric timer synced to reference audio (karaoke) or wall clock ─────
   useEffect(() => {
     if (isPaused || !isActive) return;
 
     const id = setInterval(() => {
       const elapsed =
         coachingMode === "karaoke"
-          ? Math.floor(backingTrack.getCurrentTime())
+          ? songPlayback.getCurrentTime()
           : undefined;
 
-      setSessionElapsed((prev) => {
-        const next = elapsed ?? prev + 1;
-        const idx = LYRICS.findLastIndex((l) => l.time <= next);
-        if (idx >= 0) setCurrentLyricIdx(idx);
-        return next;
-      });
+      setSessionElapsed((prev) => elapsed ?? prev + 1);
     }, coachingMode === "karaoke" ? 100 : 1000);
 
     return () => clearInterval(id);
-  }, [isPaused, isActive, coachingMode, backingTrack]);
+  }, [isPaused, isActive, coachingMode, songPlayback]);
 
   // ── Derived values (smoothed for stable meter rendering) ──────────────
   const volumePct = dbToPercent(displayMetrics.volumeDb);
   const pitchPct = pitchToPercent(displayMetrics.frequencyHz);
-  const pitchDeviation =
-    displayMetrics.frequencyHz > 0
-      ? Math.abs(displayMetrics.frequencyHz - TARGET_PITCH_HZ)
+  const targetPitchHz =
+    coachingMode === "karaoke" && syllableTracker.expectedPitchHz > 0
+      ? syllableTracker.expectedPitchHz
       : 0;
+  const pitchDeltaCents =
+    coachingMode === "karaoke" ? syllableTracker.pitchDeltaCents : 0;
 
   const sendCriticalError = useCallback(
-    (reason: string, bypassCooldown = false) => {
+    (
+      reason: string,
+      bypassCooldown = false,
+      extra?: Record<string, unknown>
+    ) => {
       if (!isConnected) return;
       const now = Date.now();
       if (!bypassCooldown && now - lastAutoFaultRef.current < AUTO_FAULT_COOLDOWN_MS) {
@@ -343,9 +402,15 @@ export default function VocalDashboard() {
       }
       lastAutoFaultRef.current = now;
 
+      const t = trackerRef.current;
       const packet = JSON.stringify({
         type: "CRITICAL_ERROR",
         reason,
+        song_id: ACTIVE_SONG.id,
+        syllable: t.activeSyllableToken,
+        expected_hz: t.expectedPitchHz || null,
+        actual_hz: metricsRef.current.frequencyHz || null,
+        ...extra,
       });
       sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
     },
@@ -363,10 +428,10 @@ export default function VocalDashboard() {
         setTimeout(() => sendCriticalError("VOLUME_SILENCE"), AUTO_FAULT_DELAY_MS)
       );
     }
-    if (isPitchWarn) {
+    if (isPitchWarn && syllableTracker.activeSyllable) {
       timers.push(
         setTimeout(
-          () => sendCriticalError("PITCH_DISTORTION_OUT_OF_BOUNDS"),
+          () => sendCriticalError("PITCH_OFF_TARGET"),
           AUTO_FAULT_DELAY_MS
         )
       );
@@ -386,10 +451,10 @@ export default function VocalDashboard() {
     if (isActive) {
       // Stop publishing mic to LiveKit so agent stops hearing us
       await localParticipant.setMicrophoneEnabled(false);
-      backingTrack.stop();
+      songPlayback.stop();
       stop();
       setSessionElapsed(0);
-      setCurrentLyricIdx(0);
+      sentSyllableResultsRef.current = 0;
       setMicError(null);
       return;
     }
@@ -407,25 +472,24 @@ export default function VocalDashboard() {
       await start(stream);
 
       if (coachingMode === "karaoke") {
-        await backingTrack.start();
+        await songPlayback.start();
       }
     } catch (err) {
       setMicError(
         err instanceof Error ? err.message : "Failed to start microphone."
       );
     }
-  }, [isActive, backingTrack, stop, localParticipant, start, coachingMode]);
+  }, [isActive, songPlayback, stop, localParticipant, start, coachingMode]);
 
-
-  // Start/stop backing track when coaching mode changes mid-session
+  // Start/stop reference audio when coaching mode changes mid-session
   useEffect(() => {
     if (!isActive) return;
     if (coachingMode === "karaoke") {
-      void backingTrack.start();
+      void songPlayback.start();
     } else {
-      backingTrack.stop();
+      songPlayback.stop();
     }
-  }, [coachingMode, isActive, backingTrack]);
+  }, [coachingMode, isActive, songPlayback]);
 
   // ── Render ────────────────────────────────────────────────────────────
   return (
@@ -441,7 +505,8 @@ export default function VocalDashboard() {
               AI Vocal Coach
             </h1>
             <p className="text-xs text-[var(--color-text-muted)]">
-              Real-time pitch &amp; volume analysis
+              {ACTIVE_SONG.metadata.songname} · {ACTIVE_SONG.metadata.tempo} BPM ·{" "}
+              {ACTIVE_SONG.metadata.time_signature}
             </p>
           </div>
         </div>
@@ -533,7 +598,7 @@ export default function VocalDashboard() {
               <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
                 <Music className="h-4 w-4 text-violet-400" />
                 <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                  Lyric Display
+                  Lyric Display — {ACTIVE_SONG.metadata.songname}
                 </h2>
                 {isPaused && (
                   <span className="ml-auto flex items-center gap-1 text-xs text-amber-400">
@@ -547,22 +612,12 @@ export default function VocalDashboard() {
                 )}
               </div>
 
-              <div className="flex flex-col items-center justify-center px-6 py-10">
-                {LYRICS.map((line, idx) => (
-                  <p
-                    key={idx}
-                    className={`text-center text-xl font-bold leading-relaxed transition-all duration-300 sm:text-2xl ${
-                      idx === currentLyricIdx
-                        ? "lyric-active scale-105"
-                        : idx < currentLyricIdx
-                        ? "lyric-inactive text-sm opacity-40"
-                        : "lyric-inactive text-base opacity-60"
-                    }`}
-                  >
-                    {line.text}
-                  </p>
-                ))}
-              </div>
+              <SyllableLyrics
+                song={ACTIVE_SONG}
+                activeLyricLineIdx={syllableTracker.activeLyricLineIdx}
+                activeSyllableToken={syllableTracker.activeSyllable?.token ?? null}
+                completedResults={syllableTracker.completedResults}
+              />
             </section>
           ) : (
             <section className="glass-card glow-violet overflow-hidden">
@@ -588,6 +643,24 @@ export default function VocalDashboard() {
                   </button>
                 </div>
               </div>
+            </section>
+          )}
+
+          {coachingMode === "karaoke" && isActive && (
+            <section className="glass-card overflow-hidden p-4">
+              <div className="mb-2 flex items-center gap-2">
+                <Activity className="h-4 w-4 text-violet-400" />
+                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                  Pitch Contour
+                </h2>
+              </div>
+              <PitchContourChart
+                song={ACTIVE_SONG}
+                elapsedSec={sessionElapsed}
+                livePitchHz={displayMetrics.frequencyHz}
+                activeSyllable={syllableTracker.activeSyllable}
+                pitchDeltaCents={syllableTracker.pitchDeltaCents}
+              />
             </section>
           )}
 
@@ -745,19 +818,30 @@ export default function VocalDashboard() {
                 />
               </div>
               <div className="mt-2 flex items-center justify-between text-xs text-[var(--color-text-muted)]">
-                <span>Target: {TARGET_PITCH_HZ} Hz</span>
-                {displayMetrics.frequencyHz > 0 && (
+                <span>
+                  {targetPitchHz > 0
+                    ? `Target: ${targetPitchHz.toFixed(0)} Hz`
+                    : syllableTracker.isRest
+                    ? "Rest"
+                    : "Target: —"}
+                </span>
+                {displayMetrics.frequencyHz > 0 && targetPitchHz > 0 && (
                   <span
                     className={
                       isPitchWarn ? "text-rose-400" : "text-emerald-400"
                     }
                   >
-                    Δ {pitchDeviation.toFixed(0)} Hz
+                    Δ {Math.abs(pitchDeltaCents).toFixed(0)}¢
+                    {pitchDeltaCents > 0 ? " sharp" : pitchDeltaCents < 0 ? " flat" : ""}
                   </span>
                 )}
               </div>
             </div>
           </section>
+
+          <PerformanceIssues
+            completedResults={syllableTracker.completedResults}
+          />
 
           {/* Session info */}
           <section className="glass-card overflow-hidden">
@@ -776,7 +860,9 @@ export default function VocalDashboard() {
                   {Math.floor(sessionElapsed / 60)
                     .toString()
                     .padStart(2, "0")}
-                  :{(sessionElapsed % 60).toString().padStart(2, "0")}
+                  :{Math.floor(sessionElapsed % 60)
+                    .toString()
+                    .padStart(2, "0")}
                 </p>
               </div>
               <div>
@@ -815,9 +901,7 @@ export default function VocalDashboard() {
               </button>
               <button
                 disabled={!isConnected}
-                onClick={() =>
-                  sendCriticalError("PITCH_DISTORTION_OUT_OF_BOUNDS", true)
-                }
+                onClick={() => sendCriticalError("PITCH_OFF_TARGET", true)}
                 className="flex items-center justify-center gap-2 rounded-lg border border-rose-500/20 bg-rose-500/10 px-4 py-2 text-xs font-semibold text-rose-400 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <AlertTriangle className="h-3.5 w-3.5" />

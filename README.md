@@ -44,8 +44,10 @@ A real-time AI-powered vocal coaching application built with **Next.js**, **Live
 
 | Direction | Type | Shape |
 |-----------|------|-------|
-| Client → Agent | `VOCAL_METRICS` | `{ "type": "VOCAL_METRICS", "volume_db": -22.4, "pitch_hz": 440.0 }` |
-| Client → Agent | `CRITICAL_ERROR` | `{ "type": "CRITICAL_ERROR", "reason": "PITCH_DISTORTION_OUT_OF_BOUNDS" }` |
+| Client → Agent | `SONG_SELECTED` | `{ "type": "SONG_SELECTED", "song_id": "en001a", "songname": "Alphabet", "tempo": 100 }` |
+| Client → Agent | `VOCAL_METRICS` | `{ "type": "VOCAL_METRICS", "volume_db": -22.4, "pitch_hz": 277.2, "syllable": "b_ii", "expected_pitch_hz": 277.2, "pitch_delta_cents": -42, "on_pitch": false }` |
+| Client → Agent | `SYLLABLE_RESULT` | `{ "type": "SYLLABLE_RESULT", "syllable": "b_ii", "issue": "sharp", "pitch_error_cents": 42 }` |
+| Client → Agent | `CRITICAL_ERROR` | `{ "type": "CRITICAL_ERROR", "reason": "PITCH_OFF_TARGET", "syllable": "b_ii", "expected_hz": 277.2, "actual_hz": 295.0 }` |
 | Agent → Client | Session Control | `{ "action": "PAUSE_TRACK" \| "RESUME_TRACK", "coach_notes": "..." }` |
 
 ## Getting Started
