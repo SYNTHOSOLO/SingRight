@@ -149,6 +149,8 @@ async def entrypoint(ctx: JobContext) -> None:
             _handle_vocal_metrics(session, message)
         elif msg_type == "CRITICAL_ERROR":
             ctx.create_task(_handle_critical_error(session, ctx, message))
+        elif msg_type == "REQUEST_FEEDBACK":
+            ctx.create_task(_handle_request_feedback(session, ctx))
         else:
             logger.debug("Unknown data-channel message type: %s", msg_type)
 
@@ -168,6 +170,38 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
     logger.info("Agent session started for participant %s", participant.identity)
+
+
+# ---------------------------------------------------------------------------
+# Feedback Handler
+# ---------------------------------------------------------------------------
+
+async def _handle_request_feedback(session: AgentSession, ctx: JobContext) -> None:
+    """Triggered when the student finishes singing and requests feedback."""
+    logger.info("Student requested performance feedback.")
+    
+    # Interrupt any active speech
+    session.interrupt()
+    
+    # Force pause client playback
+    pause_directive = json.dumps({
+        "action": "PAUSE_TRACK",
+        "coach_notes": "Analyzing session and preparing verbal critique...",
+    })
+    await ctx.room.local_participant.publish_data(
+        payload=pause_directive.encode("utf-8"),
+        topic="session_control",
+        reliable=True,
+    )
+    
+    await session.generate_reply(
+        instructions=(
+            "The student has completed their singing performance and requested feedback. "
+            "Analyze the vocal metrics (volume in dB and pitch in Hz) from the conversation history. "
+            "Give them a constructive, encouraging verbal critique. "
+            "State what went well and name one target improvement detail."
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

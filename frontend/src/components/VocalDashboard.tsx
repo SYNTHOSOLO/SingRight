@@ -69,6 +69,7 @@ export default function VocalDashboard() {
   const isConnected = connectionState === ConnectionState.Connected;
 
   // ── Dashboard state ──────────────────────────────────────────────────
+  const [coachingMode, setCoachingMode] = useState<"karaoke" | "conversational">("karaoke");
   const [isPaused, setIsPaused] = useState(false);
   const [coachNotes, setCoachNotes] = useState<string | null>(null);
   const [coachStatus, setCoachStatus] = useState<
@@ -250,11 +251,18 @@ export default function VocalDashboard() {
     [isConnected, sendData]
   );
 
+  // ── Request Feedback ─────────────────────────────────────────────────
+  const requestFeedback = useCallback(() => {
+    if (!isConnected) return;
+    const packet = JSON.stringify({ type: "REQUEST_FEEDBACK" });
+    sendData(new TextEncoder().encode(packet), { reliable: true });
+  }, [isConnected, sendData]);
+
   // ── Render ────────────────────────────────────────────────────────────
   return (
     <div className="relative mx-auto flex min-h-dvh max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
       {/* ── Header ────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-fuchsia-600 shadow-lg shadow-violet-600/20">
             <Headphones className="h-5 w-5 text-white" />
@@ -269,27 +277,53 @@ export default function VocalDashboard() {
           </div>
         </div>
 
-        {/* Mic toggle */}
-        <button
-          onClick={isActive ? stop : start}
-          className={`group relative flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold transition-all duration-300 ${
-            isActive
-              ? "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 border border-rose-500/30"
-              : "bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white hover:shadow-lg hover:shadow-violet-600/25"
-          }`}
-        >
-          {isActive ? (
-            <>
-              <MicOff className="h-4 w-4" />
-              Stop Session
-            </>
-          ) : (
-            <>
-              <Mic className="h-4 w-4" />
-              Start Session
-            </>
-          )}
-        </button>
+        {/* Mode selector and Mic toggle */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Mode Selector Tab Bar */}
+          <div className="flex rounded-full bg-white/5 p-1 border border-white/5">
+            <button
+              onClick={() => setCoachingMode("karaoke")}
+              className={`rounded-full px-4 py-1.5 text-xs font-semibold transition ${
+                coachingMode === "karaoke"
+                  ? "bg-violet-600 text-white shadow"
+                  : "text-[var(--color-text-muted)] hover:text-white"
+              }`}
+            >
+              Karaoke Mode
+            </button>
+            <button
+              onClick={() => setCoachingMode("conversational")}
+              className={`rounded-full px-4 py-1.5 text-xs font-semibold transition ${
+                coachingMode === "conversational"
+                  ? "bg-violet-600 text-white shadow"
+                  : "text-[var(--color-text-muted)] hover:text-white"
+              }`}
+            >
+              Conversational Mode
+            </button>
+          </div>
+
+          <button
+            onClick={isActive ? stop : start}
+            className={`group relative flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold transition-all duration-300 ${
+              isActive
+                ? "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 border border-rose-500/30"
+                : "bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white hover:shadow-lg hover:shadow-violet-600/25"
+            }`}
+          >
+            {isActive ? (
+              <>
+                <MicOff className="h-4 w-4" />
+                Stop Session
+              </>
+            ) : (
+              <>
+                <Mic className="h-4 w-4" />
+                Start Session
+              </>
+            )}
+          </button>
+        </div>
       </header>
 
       {/* ── Alert Overlay ─────────────────────────────────────────────── */}
@@ -311,42 +345,69 @@ export default function VocalDashboard() {
       <div className="grid gap-6 lg:grid-cols-3">
         {/* ── Left column: Lyrics + Coach Feed ────────────────────────── */}
         <div className="flex flex-col gap-6 lg:col-span-2">
-          {/* Lyrics card */}
-          <section className="glass-card glow-violet overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
-              <Music className="h-4 w-4 text-violet-400" />
-              <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
-                Lyric Display
-              </h2>
-              {isPaused && (
-                <span className="ml-auto flex items-center gap-1 text-xs text-amber-400">
-                  <Pause className="h-3 w-3" /> Paused
-                </span>
-              )}
-              {!isPaused && isActive && (
-                <span className="ml-auto flex items-center gap-1 text-xs text-emerald-400">
-                  <Play className="h-3 w-3" /> Playing
-                </span>
-              )}
-            </div>
+          {/* Lyrics / Conversational Card */}
+          {coachingMode === "karaoke" ? (
+            <section className="glass-card glow-violet overflow-hidden">
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+                <Music className="h-4 w-4 text-violet-400" />
+                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                  Lyric Display
+                </h2>
+                {isPaused && (
+                  <span className="ml-auto flex items-center gap-1 text-xs text-amber-400">
+                    <Pause className="h-3 w-3" /> Paused
+                  </span>
+                )}
+                {!isPaused && isActive && (
+                  <span className="ml-auto flex items-center gap-1 text-xs text-emerald-400">
+                    <Play className="h-3 w-3" /> Playing
+                  </span>
+                )}
+              </div>
 
-            <div className="flex flex-col items-center justify-center px-6 py-10">
-              {LYRICS.map((line, idx) => (
-                <p
-                  key={idx}
-                  className={`text-center text-xl font-bold leading-relaxed transition-all duration-300 sm:text-2xl ${
-                    idx === currentLyricIdx
-                      ? "lyric-active scale-105"
-                      : idx < currentLyricIdx
-                      ? "lyric-inactive text-sm opacity-40"
-                      : "lyric-inactive text-base opacity-60"
-                  }`}
-                >
-                  {line.text}
+              <div className="flex flex-col items-center justify-center px-6 py-10">
+                {LYRICS.map((line, idx) => (
+                  <p
+                    key={idx}
+                    className={`text-center text-xl font-bold leading-relaxed transition-all duration-300 sm:text-2xl ${
+                      idx === currentLyricIdx
+                        ? "lyric-active scale-105"
+                        : idx < currentLyricIdx
+                        ? "lyric-inactive text-sm opacity-40"
+                        : "lyric-inactive text-base opacity-60"
+                    }`}
+                  >
+                    {line.text}
+                  </p>
+                ))}
+              </div>
+            </section>
+          ) : (
+            <section className="glass-card glow-violet overflow-hidden">
+              <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-5 py-3">
+                <Radio className="h-4 w-4 text-cyan-400 animate-pulse" />
+                <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
+                  Conversational Free Talk Mode
+                </h2>
+              </div>
+              <div className="flex flex-col items-center justify-center px-6 py-10 text-center">
+                <p className="max-w-md text-sm text-[var(--color-text-secondary)] leading-relaxed">
+                  You are in free-talk mode. Speak, sing, or chat with the AI vocal coach.
+                  Your speech will be transcribed and evaluated in real time.
                 </p>
-              ))}
-            </div>
-          </section>
+                <div className="mt-6 flex flex-wrap gap-3 justify-center">
+                  <button
+                    disabled={!isConnected || !isActive}
+                    onClick={requestFeedback}
+                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-emerald-500/20 transition hover:shadow-xl hover:shadow-emerald-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Play className="h-4 w-4 fill-white" />
+                    Stop Performance &amp; Get Feedback
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Audio Waveform visualizer */}
           <section className="glass-card overflow-hidden">
