@@ -487,7 +487,7 @@ export default function VocalDashboard() {
     });
   }, []);
 
-  const { isActive, analyserNode, error: analyzerError, start, stop } = useVocalAnalyzer({
+  const { isActive, analyserNode, error: analyzerError, start, stop, micLabel } = useVocalAnalyzer({
     onMetricsUpdate,
   });
 
@@ -1100,9 +1100,16 @@ export default function VocalDashboard() {
                         : "Disconnected"}
                 </span>
               </div>
-              <p className="truncate text-[11px] text-[var(--color-text-muted)]">
-                {ACTIVE_SONG.metadata.songname} · {ACTIVE_SONG.metadata.tempo} BPM ·{" "}
-                {ACTIVE_SONG.metadata.time_signature}
+              <p className="truncate text-[11px] text-[var(--color-text-muted)] flex flex-wrap items-center gap-1.5">
+                <span>{ACTIVE_SONG.metadata.songname} · {ACTIVE_SONG.metadata.tempo} BPM · {ACTIVE_SONG.metadata.time_signature}</span>
+                {isActive && micLabel && (
+                  <>
+                    <span className="text-zinc-600">·</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-violet-600/10 border border-violet-500/20 px-2 py-0.5 text-[9px] font-semibold text-violet-300">
+                      <Mic className="h-2.5 w-2.5" /> {micLabel}
+                    </span>
+                  </>
+                )}
               </p>
             </div>
           </div>
