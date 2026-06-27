@@ -27,7 +27,7 @@ from livekit.agents import (
     llm,
 )
 from livekit.plugins.openai import realtime
-from openai.types.beta.realtime.session import TurnDetection
+from openai.types.beta.realtime.session import InputAudioTranscription, TurnDetection
 
 load_dotenv()
 
@@ -149,6 +149,20 @@ AUDIO_CAPABILITY_BLOCK = (
     "NEVER say you cannot play audio, are text-only, or lack an instrument."
 )
 
+ENGLISH_ONLY_RULE = (
+    "CRITICAL — ENGLISH ONLY (non-negotiable):\n"
+    "• You MUST speak ONLY English in every spoken response — no exceptions.\n"
+    "• NEVER use Spanish, French, or any other language — not even a single word.\n"
+    "• If the student speaks another language, still respond ONLY in English.\n"
+    "• All greetings, corrections, tips, demonstrations, and feedback: English only.\n"
+    "• This rule overrides everything else. English only. Always English."
+)
+
+
+def _english_reply(instructions: str) -> str:
+    """Wrap ad-hoc reply instructions with repeated English-only enforcement."""
+    return f"{ENGLISH_ONLY_RULE}\n\n{instructions.strip()}\n\n{ENGLISH_ONLY_RULE}"
+
 MAX_CHAT_ITEMS = 48
 
 
@@ -261,6 +275,7 @@ class VocalCoachAgent(Agent):
 
     SYSTEM_INSTRUCTIONS = (
         "You are an expert AI vocal coach conducting a live singing lesson.\n\n"
+        f"{ENGLISH_ONLY_RULE}\n\n"
         f"{AUDIO_CAPABILITY_BLOCK}\n\n"
         "Examples you MUST use tools for:\n"
         "- 'What does G3 sound like?' → call teach_pitch('G3')\n"
@@ -278,8 +293,10 @@ class VocalCoachAgent(Agent):
         "or pitch going off the expected note for the active syllable), "
         "IMMEDIATELY interrupt, explain what went wrong, and guide the student "
         "to correct it.\n"
-        "3. Use the `control_session_playback` tool to pause or resume the "
-        "backing track and show coaching tips in the UI.\n"
+        "3. Use the `control_session_playback` tool to pause, resume, or restart "
+        "the backing track and show coaching tips in the UI. Use RESTART_TRACK "
+        "(not RESUME_TRACK) when the student says 'play again', 'start over', "
+        "or wants the song from the beginning.\n"
         "4. Use `play_reference_tone` to play the correct pitch for a syllable "
         "on the student's speakers so they can hear the target note.\n"
         "5. Use `demonstrate_syllable` to play a reference tone AND sing/hum "
@@ -298,7 +315,8 @@ class VocalCoachAgent(Agent):
         "10. Keep your spoken responses concise and warm — you are coaching, "
         "not lecturing.\n"
         "11. When the student is doing well, simply let them continue and "
-        "offer brief positive reinforcement."
+        "offer brief positive reinforcement.\n\n"
+        f"{ENGLISH_ONLY_RULE}"
     )
 
     def __init__(self, ctx: "JobContext", session_ref: dict[str, Any]) -> None:
@@ -311,24 +329,6 @@ class VocalCoachAgent(Agent):
             payload=json.dumps(payload).encode("utf-8"),
             topic="session_control",
             reliable=True,
-        )
-
-    async def _invite_sing_sample(self, played: str, instrument: str = "both") -> None:
-        session = self._session_ref.get("session")
-        if not session:
-            return
-        inst_label = {
-            "piano": "piano",
-            "guitar": "guitar",
-            "both": "piano and guitar",
-        }.get(instrument, instrument)
-        await session.generate_reply(
-            instructions=(
-                f"The {inst_label} sample for {played} just finished. "
-                "Do NOT replay it. Say ONE short warm line only, e.g. "
-                "'Let's sing that together — match what you heard.' "
-                "Under 2 sentences."
-            )
         )
 
     async def _publish_notes_display(
@@ -384,13 +384,26 @@ class VocalCoachAgent(Agent):
         })
         logger.info("Teaching notes → %s on %s", played, inst)
 
-        total_seconds = sum(n["duration_ms"] for n in notes_payload) / 1000 + 0.35
-        await asyncio.sleep(total_seconds)
+        # Brief pause so the sample starts before the spoken reply, but never
+        # long enough to block the tool call and trigger interruption timeouts.
+        await asyncio.sleep(min(0.6, sum(n["duration_ms"] for n in notes_payload) / 1000))
 
+        inst_label = {
+            "piano": "piano",
+            "guitar": "guitar",
+            "both": "piano and guitar",
+        }.get(inst, inst)
         if invite_to_sing:
-            await self._invite_sing_sample(played, inst)
-
-        return f"Taught {played} on {inst} (played={'yes' if play_sound else 'no'})."
+            return (
+                f"[The {inst_label} sample for {played} is playing on the student's "
+                "speakers — do NOT replay it.] Say ONE short warm line in English "
+                "inviting them to sing it back, e.g. 'Now you try — match what you "
+                "heard.' Under 2 sentences."
+            )
+        return (
+            f"[Played {played} on {inst} through the student's speakers — do NOT "
+            "replay it.] Confirm briefly in English; never say audio is unavailable."
+        )
 
     async def handle_user_play_request(
         self, pitch: str, instrument: str = "piano"
@@ -427,14 +440,15 @@ class VocalCoachAgent(Agent):
             invite_to_sing=True,
         )
 
-        chat_ctx = agent.chat_ctx.copy()
+        chat_ctx = self.chat_ctx.copy()
         chat_ctx.add_message(
             role="system",
             content=(
                 f"[USER PLAY REQUEST COMPLETED] Piano/guitar audio for {note_name} "
                 f"({hz:.0f} Hz) played through the student's speakers and shown on "
                 f"the {inst} board. Confirm the sample played — NEVER say you "
-                "cannot play piano or that audio is unavailable."
+                "cannot play piano or that audio is unavailable.\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             ),
         )
         await _commit_chat_ctx(self, chat_ctx)
@@ -443,8 +457,10 @@ class VocalCoachAgent(Agent):
     @llm.function_tool(
         description=(
             "Control the student's session playback and display coaching tips "
-            "in their Coach Messages panel. Use action PAUSE_TRACK to stop the "
-            "backing track, RESUME_TRACK to restart it, or SHOW_TIPS to display "
+            "in their Coach Messages panel. Use PAUSE_TRACK to stop the "
+            "backing track, RESUME_TRACK to continue from where it paused, "
+            "RESTART_TRACK to start the song from the beginning (use when the "
+            "student says 'play again' or 'start over'), or SHOW_TIPS to display "
             "a text-only coaching message without affecting playback or speaking."
         )
     )
@@ -455,9 +471,11 @@ class VocalCoachAgent(Agent):
     ) -> str:
         """
         Args:
-            action: The playback control action. Must be one of: PAUSE_TRACK, RESUME_TRACK, SHOW_TIPS.
+            action: The playback control action. Must be one of: PAUSE_TRACK, RESUME_TRACK, RESTART_TRACK, SHOW_TIPS.
             coach_notes: A short coaching note or tip to display to the student in the UI alongside the action.
         """
+        if action not in ("PAUSE_TRACK", "RESUME_TRACK", "RESTART_TRACK", "SHOW_TIPS"):
+            return f"Unknown action {action!r}. Use PAUSE_TRACK, RESUME_TRACK, RESTART_TRACK, or SHOW_TIPS."
         room = self._ctx.room
         directive = json.dumps({"action": action, "coach_notes": coach_notes})
         await room.local_participant.publish_data(
@@ -770,26 +788,22 @@ class VocalCoachAgent(Agent):
             "action": "PAUSE_TRACK",
             "coach_notes": f"Demonstrating '{syllable}' — listen, then sing along.",
         })
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.15)
         await self._publish_session_action({
             "action": "PLAY_REFERENCE_TONE",
             "frequency_hz": frequency_hz,
             "syllable": syllable,
             "duration_ms": 1400,
         })
-        await asyncio.sleep(1.6)
+        await asyncio.sleep(0.3)
 
-        session = self._session_ref.get("session")
         hint = f" ({lyric_hint})" if lyric_hint else ""
-        if session:
-            await session.generate_reply(
-                instructions=(
-                    f"Sing or hum only the syllable '{syllable}'{hint} at "
-                    f"{frequency_hz:.0f} Hz clearly and warmly — one sustained "
-                    f"note, about 1 second. Then invite the student to match you."
-                )
-            )
-        return f"Demonstrated '{syllable}' at {frequency_hz:.0f} Hz"
+        return (
+            f"[Reference tone for '{syllable}'{hint} at {frequency_hz:.0f} Hz is "
+            "playing on the student's speakers.] Now sing or hum ONLY the syllable "
+            f"'{syllable}' at that pitch — one sustained note, about 1 second, warm "
+            "and clear — then invite the student to match you. English only."
+        )
 
     @llm.function_tool(
         description=(
@@ -819,18 +833,14 @@ class VocalCoachAgent(Agent):
             "lyric_text": lyric_text,
             "coach_notes": f"Playing pitches for: {lyric_text}",
         })
+        await asyncio.sleep(0.4)
 
-        session = self._session_ref.get("session")
-        if session:
-            await asyncio.sleep(5.0)
-            await session.generate_reply(
-                instructions=(
-                    f"Sing the lyric line \"{lyric_text}\" clearly with correct "
-                    f"pitches, syllable by syllable. Keep it musical and warm, "
-                    f"then ask the student to sing it back with you."
-                )
-            )
-        return f"Sang lyric line {line_index}: {lyric_text}"
+        return (
+            f"[Reference pitches for the line \"{lyric_text}\" are playing on the "
+            "student's speakers.] Now sing this line yourself, clearly and warmly, "
+            "syllable by syllable with correct pitch, then ask the student to sing "
+            "it back with you. English only."
+        )
 
     @llm.function_tool(
         description=(
@@ -863,6 +873,10 @@ async def entrypoint(ctx: JobContext) -> None:
     openai_realtime = realtime.RealtimeModel(
         voice="shimmer",
         modalities=["audio", "text"],
+        input_audio_transcription=InputAudioTranscription(
+            model="gpt-4o-mini-transcribe",
+            language="en",
+        ),
         turn_detection=TurnDetection(
             type="server_vad",
             threshold=0.45,        # slightly more sensitive than 0.5
@@ -892,12 +906,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 f"[INSTRUMENT FOLLOW ON — {instrument}]\n"
                 "The student's microphone pitch is mirrored LIVE as piano/guitar "
                 "simulation in their browser while they sing. Use the same "
-                "instrument setting when playing note samples."
+                "instrument setting when playing note samples.\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             )
         else:
             content = (
                 "[INSTRUMENT FOLLOW OFF]\n"
-                "Live piano/guitar mirror is disabled. Only play samples when asked."
+                "Live piano/guitar mirror is disabled. Only play samples when asked.\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             )
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=content)
@@ -909,7 +925,7 @@ async def entrypoint(ctx: JobContext) -> None:
         _strip_system_messages_with_markers(chat_ctx, ("[AUDIO CAPABILITIES",))
         chat_ctx.add_message(
             role="system",
-            content=f"[AUDIO CAPABILITIES ACTIVE]\n{AUDIO_CAPABILITY_BLOCK}",
+            content=f"[AUDIO CAPABILITIES ACTIVE]\n{AUDIO_CAPABILITY_BLOCK}\n\n{ENGLISH_ONLY_RULE}",
         )
         await _commit_chat_ctx(agent, chat_ctx)
 
@@ -932,13 +948,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 "Play/show FIRST, then explain.\n"
                 "7. When the student requests feedback (REQUEST_FEEDBACK), you MAY speak "
                 "in full sentences with a detailed critique.\n"
-                "8. Do NOT pause playback, play reference tones, or demonstrate unless asked."
+                "8. Do NOT pause playback, play reference tones, or demonstrate unless asked.\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             )
         elif mode == "conversational":
             content = (
                 "[CONVERSATIONAL MODE ACTIVE]\n"
                 "Free-talk mode with no backing track. You may speak normally for coaching.\n"
-                f"{AUDIO_CAPABILITY_BLOCK}"
+                f"{AUDIO_CAPABILITY_BLOCK}\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             )
         else:
             content = (
@@ -952,7 +970,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 "text tips WITHOUT pausing the track or speaking.\n"
                 "3. Only use PAUSE_TRACK + spoken correction for serious issues "
                 "that require stopping the student.\n"
-                "4. React to syllable results and live telemetry with silent cues first."
+                "4. React to syllable results and live telemetry with silent cues first.\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             )
 
         chat_ctx = agent.chat_ctx.copy()
@@ -969,7 +988,8 @@ async def entrypoint(ctx: JobContext) -> None:
         song_context = (
             f"[SONG SELECTED] The student is practicing \"{songname}\" "
             f"at {tempo} BPM. Opening lyric: \"{excerpt}\". "
-            "You will receive syllable-level pitch results as they sing."
+            "You will receive syllable-level pitch results as they sing.\n\n"
+            f"{ENGLISH_ONLY_RULE}"
         )
         chat_ctx = agent.chat_ctx.copy()
         chat_ctx.add_message(role="system", content=song_context)
@@ -1045,7 +1065,8 @@ async def entrypoint(ctx: JobContext) -> None:
             state_content = (
                 f"{SESSION_STATE_MARKER}\n"
                 f"{telemetry_context}\n"
-                f"{AUDIO_CAPABILITY_BLOCK}"
+                f"{AUDIO_CAPABILITY_BLOCK}\n\n"
+                f"{ENGLISH_ONLY_RULE}"
             )
 
             chat_ctx = agent.chat_ctx.copy()
@@ -1161,8 +1182,8 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("Participant joined: %s", participant.identity)
 
     await session.generate_reply(
-        instructions=(
-            "Greet the student warmly. Introduce yourself as their AI vocal "
+        instructions=_english_reply(
+            "Greet the student warmly in English. Introduce yourself as their AI vocal "
             "coach. You CAN play piano and guitar notes and chords on their "
             "speakers and highlight keys on the Note Board — invite them to try "
             "'play G3 on piano' or 'play a C chord'. You monitor pitch during "
@@ -1179,29 +1200,39 @@ async def entrypoint(ctx: JobContext) -> None:
 async def _handle_request_feedback(session: AgentSession, ctx: JobContext) -> None:
     """Triggered when the student finishes singing and requests feedback."""
     logger.info("Student requested performance feedback.")
-    
-    # Interrupt any active speech
+
     session.interrupt()
-    
-    # Force pause client playback
+
     pause_directive = json.dumps({
         "action": "PAUSE_TRACK",
         "coach_notes": "Analyzing session and preparing verbal critique...",
+        "reason": "feedback",
     })
     await ctx.room.local_participant.publish_data(
         payload=pause_directive.encode("utf-8"),
         topic="session_control",
         reliable=True,
     )
-    
+
     await session.generate_reply(
-        instructions=(
+        instructions=_english_reply(
             "The student has completed their singing performance and requested feedback. "
             "Review the syllable-level results and live telemetry from the conversation history. "
             "Name specific syllables that were sharp, flat, quiet, or missed, and what went well. "
             "Give a constructive, encouraging verbal critique with one clear target improvement."
         )
     )
+
+    resume_directive = json.dumps({
+        "action": "RESUME_TRACK",
+        "coach_notes": "Feedback complete — keep practicing!",
+    })
+    await ctx.room.local_participant.publish_data(
+        payload=resume_directive.encode("utf-8"),
+        topic="session_control",
+        reliable=True,
+    )
+    logger.info("Feedback delivered; session playback resumed.")
 
 
 # ---------------------------------------------------------------------------
@@ -1309,7 +1340,7 @@ async def _handle_critical_error(
         ),
     )
 
-    await session.generate_reply(instructions=correction_instruction)
+    await session.generate_reply(instructions=_english_reply(correction_instruction))
     logger.info("Barge-in correction dispatched for reason: %s", reason)
 
 

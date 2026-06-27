@@ -68,3 +68,12 @@ export function parsePlayRequest(text: string): PlayRequest | null {
 export function playRequestKey(req: PlayRequest): string {
   return `${req.pitch.toLowerCase()}|${req.instrument}`;
 }
+
+/** Detect requests to restart the backing track from the beginning. */
+export function parseRestartRequest(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return /\b(play\s+again|start\s+over|restart(?:\s+(?:the\s+)?song)?|sing\s+again|try\s+again|from\s+the\s+beginning)\b/i.test(
+    trimmed
+  );
+}

@@ -34,8 +34,11 @@ export function nearestOctaveCentsDeviation(actualHz: number, expectedHz: number
   return bestSignedCents;
 }
 
-export const PITCH_WARN_CENTS = 50;
-export const PITCH_CLEAR_CENTS = 35;
-export const PITCH_MAJOR_CENTS = 80;
+/** Within this many cents of target counts as on-pitch (green / correct). */
+export const PITCH_CLEAR_CENTS = 60;
+/** Beyond this many cents triggers a warning state. */
+export const PITCH_WARN_CENTS = 90;
+/** Clearly wrong — used for major-issue classification. */
+export const PITCH_MAJOR_CENTS = 100;
 export const VOLUME_SILENCE_THRESHOLD_DB = -70;
 export const SYLLABLE_VOICED_RATIO = 0.2;

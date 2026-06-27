@@ -18,6 +18,8 @@ export interface UseSyllableTrackerOptions {
   volumeDb: number;
   enabled: boolean;
   keyShiftSemitones?: number;
+  /** Increment to clear scored syllables and restart tracking. */
+  restartKey?: number;
 }
 
 export interface SyllableTrackerState {
@@ -72,7 +74,15 @@ function classifyIssue(
 export function useSyllableTracker(
   options: UseSyllableTrackerOptions
 ): SyllableTrackerState {
-  const { song, elapsedSec, livePitchHz, volumeDb, enabled, keyShiftSemitones = 0 } = options;
+  const {
+    song,
+    elapsedSec,
+    livePitchHz,
+    volumeDb,
+    enabled,
+    keyShiftSemitones = 0,
+    restartKey = 0,
+  } = options;
 
   const [completedResults, setCompletedResults] = useState<SyllableResult[]>([]);
   const samplesRef = useRef<Map<string, Sample[]>>(new Map());
@@ -171,13 +181,13 @@ export function useSyllableTracker(
     }
   }, [enabled, elapsedSec, song.syllables]);
 
-  // Reset on disable
+  // Reset on disable or explicit restart
   useEffect(() => {
-    if (enabled) return;
+    if (enabled && restartKey === 0) return;
     samplesRef.current.clear();
     scoredRef.current.clear();
     setCompletedResults([]);
-  }, [enabled]);
+  }, [enabled, restartKey]);
 
   return {
     activeSyllable,

@@ -27,6 +27,7 @@ import {
   Piano,
   Minus,
   Plus,
+  RotateCcw,
 } from "lucide-react";
 import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
 import { useSongPlayback } from "@/hooks/useSongPlayback";
@@ -48,9 +49,12 @@ import InstrumentNoteBoard from "@/components/InstrumentNoteBoard";
 import { hzToNoteName, type DemoInstrument } from "@/lib/audio/notes";
 import {
   parsePlayRequest,
+  parseRestartRequest,
   playRequestKey,
 } from "@/lib/audio/playRequestParser";
-import { captureVocalMicStream } from "@/lib/audio/micCapture";
+import { captureVocalMicStream, captureUplinkMicStream } from "@/lib/audio/micCapture";
+import { createMicFanout, type MicFanoutHandle } from "@/lib/audio/micFanout";
+import { useMicUplinkGate, useRemoteAgentSpeaking } from "@/hooks/useMicUplinkGate";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -168,6 +172,7 @@ export default function VocalDashboard() {
     "idle" | "speaking" | "paused"
   >("idle");
   const [sessionElapsed, setSessionElapsed] = useState(0);
+  const [sessionRestartKey, setSessionRestartKey] = useState(0);
   const elapsedRef = useRef(0);
   const audioClockActiveRef = useRef(false);
   const lastElapsedUiUpdateRef = useRef(0);
@@ -225,7 +230,13 @@ export default function VocalDashboard() {
 
   const lastPlayRequestRef = useRef<string>("");
   const lastPlayRequestAtRef = useRef(0);
+  const lastRestartRequestAtRef = useRef(0);
+  const awaitingFeedbackResumeRef = useRef(false);
+  const feedbackAgentSpokeRef = useRef(false);
+  const restartSongRef = useRef<(notes?: string) => Promise<void>>(async () => {});
   const micStreamRef = useRef<MediaStream | null>(null);
+  const micFanoutRef = useRef<MicFanoutHandle | null>(null);
+  const [micFanout, setMicFanout] = useState<MicFanoutHandle | null>(null);
   const micPubRef = useRef<LocalTrackPublication | null>(null);
 
   const tonePlayer = useTonePlayer();
@@ -299,11 +310,19 @@ export default function VocalDashboard() {
           setAlertMessage(notes ?? "Coach is intervening…");
           setCoachNotes(notes ?? null);
         } else if (action === "RESUME_TRACK") {
+          awaitingFeedbackResumeRef.current = false;
+          feedbackAgentSpokeRef.current = false;
           setIsPaused(false);
           setCoachStatus("idle");
           setAlertMessage(null);
           setCoachNotes(notes ?? null);
           setCoachDemonstrating(false);
+          // Feedback is a one-shot spoken critique. Once it's delivered, return
+          // to silent listening so the agent keeps hearing the student (in
+          // conversational non-interrupt mode) instead of monologuing.
+          setAllowAgentSpeech(false);
+        } else if (action === "RESTART_TRACK") {
+          void restartSongRef.current(notes ?? undefined);
         } else if (action === "SHOW_TIPS") {
           setCoachNotes(notes ?? null);
           if (notes) pushCoachMessage(notes, "tip");
@@ -325,12 +344,12 @@ export default function VocalDashboard() {
             duration_ms?: number;
           }>;
           if (rawNotes?.length) {
+            // Visual-only: highlight the board but do NOT enter demonstrating
+            // state (no speaker audio) so the student's mic stays open.
             const inst = (parsed.instrument as DemoInstrument) ?? "piano";
             setDemoInstrument(inst);
             setDemoNotes(rawNotes.map((n) => n.note_name));
             setDemoActiveNote(rawNotes[0]?.note_name ?? null);
-            setCoachDemonstrating(true);
-            setCoachStatus("speaking");
             setCoachNotes(
               notes ?? `On the board: ${rawNotes.map((n) => n.note_name).join(", ")}`
             );
@@ -409,8 +428,9 @@ export default function VocalDashboard() {
               durationMs: Math.max(300, Math.round((s.end - s.start) * 1000)),
               syllable: s.token,
             }));
-            void tonePlayerRef.current.playSequence(events).then(() => {
+            void tonePlayerRef.current.playSequence(events).finally(() => {
               setCoachDemonstrating(false);
+              setDemoActiveNote(null);
             });
           }
         } else if (action === "REQUEST_ANALYSIS") {
@@ -498,6 +518,7 @@ export default function VocalDashboard() {
     volumeDb: displayMetrics.volumeDb,
     enabled: isActive && coachingMode === "karaoke",
     keyShiftSemitones: keyShift,
+    restartKey: sessionRestartKey,
   });
 
   const isPitchWarn =
@@ -511,6 +532,91 @@ export default function VocalDashboard() {
     isPitchWarn,
     elapsedSec: sessionElapsed,
   };
+
+  const restartSong = useCallback(
+    async (notes?: string) => {
+      if (!isActive || coachingMode !== "karaoke") return;
+      setIsPaused(false);
+      setCoachStatus("idle");
+      setAlertMessage(null);
+      setCoachDemonstrating(false);
+      if (notes) {
+        setCoachNotes(notes);
+        pushCoachMessage(notes, "tip");
+      }
+      audioClockActiveRef.current = false;
+      elapsedRef.current = 0;
+      setSessionElapsed(0);
+      sentSyllableResultsRef.current = 0;
+      setSessionRestartKey((k) => k + 1);
+      await songPlayback.start();
+    },
+    [isActive, coachingMode, songPlayback, pushCoachMessage]
+  );
+  restartSongRef.current = restartSong;
+
+  // The agent's TTS is only audible when it is NOT in silent cue mode
+  // (conversational + non-interrupt + speech not explicitly allowed). When it is
+  // inaudible there is no echo, so the student's mic must stay open.
+  const agentAudioMuted =
+    coachingMode === "conversational" && nonInterruptMode && !allowAgentSpeech;
+
+  useMicUplinkGate({
+    fanout: micFanout,
+    coachDemonstrating,
+    agentAudible: !agentAudioMuted,
+  });
+
+  // Safety net: never let the demonstrating flag (which mutes the student's mic
+  // uplink) stay stuck on if a tone player promise never resolves.
+  useEffect(() => {
+    if (!coachDemonstrating) return;
+    const t = setTimeout(() => {
+      setCoachDemonstrating(false);
+      setDemoActiveNote(null);
+    }, 15000);
+    return () => clearTimeout(t);
+  }, [coachDemonstrating]);
+
+  // Auto-resume the karaoke track after a coach demonstration finishes. Teaching
+  // tools pause the track to play a sample but never send RESUME_TRACK, which
+  // would otherwise leave the pitch lane frozen indefinitely.
+  const prevDemonstratingRef = useRef(false);
+  useEffect(() => {
+    const finishedDemo = prevDemonstratingRef.current && !coachDemonstrating;
+    prevDemonstratingRef.current = coachDemonstrating;
+    if (!finishedDemo) return;
+    if (coachingMode !== "karaoke" || !isActive) return;
+    if (awaitingFeedbackResumeRef.current) return; // feedback owns resume
+    setIsPaused(false);
+    setCoachStatus("idle");
+    setAlertMessage(null);
+  }, [coachDemonstrating, coachingMode, isActive]);
+
+  const agentSpeaking = useRemoteAgentSpeaking();
+
+  // Resume karaoke after verbal feedback — backend sends RESUME_TRACK too, but
+  // this recovers if the directive is delayed or generate_reply returns early.
+  useEffect(() => {
+    if (!awaitingFeedbackResumeRef.current) return;
+
+    if (agentSpeaking) {
+      feedbackAgentSpokeRef.current = true;
+      if (isPaused) setCoachStatus("speaking");
+      return;
+    }
+
+    if (!feedbackAgentSpokeRef.current || !isPaused) return;
+
+    awaitingFeedbackResumeRef.current = false;
+    feedbackAgentSpokeRef.current = false;
+    setIsPaused(false);
+    setCoachStatus("idle");
+    setAlertMessage(null);
+    // Return to silent listening after feedback in every mode so the agent
+    // resumes hearing the student instead of staying in talk mode.
+    setAllowAgentSpeech(false);
+  }, [agentSpeaking, isPaused, coachingMode]);
 
   useEffect(() => {
     if (isActive) return;
@@ -671,11 +777,21 @@ export default function VocalDashboard() {
   );
   const latestStudentText = studentLines.at(-1)?.text ?? "";
 
-  const agentAudioMuted =
-    coachingMode === "conversational" &&
-    nonInterruptMode &&
-    !allowAgentSpeech;
   useAgentAudioMute(agentAudioMuted);
+
+  // Detect "play again" / restart requests in student speech
+  useEffect(() => {
+    if (!isConnected || !isActive || coachingMode !== "karaoke" || !latestStudentText) {
+      return;
+    }
+    if (!parseRestartRequest(latestStudentText)) return;
+
+    const now = Date.now();
+    if (now - lastRestartRequestAtRef.current < 4000) return;
+    lastRestartRequestAtRef.current = now;
+
+    void restartSong("Restarting the song from the beginning.");
+  }, [latestStudentText, isConnected, isActive, coachingMode, restartSong]);
 
   // Detect "play G3 on piano" in student speech → direct backend execution
   useEffect(() => {
@@ -988,6 +1104,8 @@ export default function VocalDashboard() {
   // ── Request Feedback ─────────────────────────────────────────────────
   const requestFeedback = useCallback(() => {
     if (!isConnected) return;
+    awaitingFeedbackResumeRef.current = true;
+    feedbackAgentSpokeRef.current = false;
     setAllowAgentSpeech(true);
     const packet = JSON.stringify({ type: "REQUEST_FEEDBACK" });
     sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
@@ -1001,6 +1119,9 @@ export default function VocalDashboard() {
         await localParticipant.setMicrophoneEnabled(false);
       }
       micPubRef.current = null;
+      micFanoutRef.current?.dispose();
+      micFanoutRef.current = null;
+      setMicFanout(null);
       micStreamRef.current?.getTracks().forEach((t) => t.stop());
       micStreamRef.current = null;
       songPlayback.stop();
@@ -1008,6 +1129,7 @@ export default function VocalDashboard() {
       tonePlayer.setInstrumentFollow(false);
       setInstrumentFollowEnabled(false);
       setSessionElapsed(0);
+      setSessionRestartKey(0);
       elapsedRef.current = 0;
       audioClockActiveRef.current = false;
       sentSyllableResultsRef.current = 0;
@@ -1020,14 +1142,20 @@ export default function VocalDashboard() {
 
     setMicError(null);
     try {
-      // One raw mic stream feeds both pitch analysis and LiveKit (avoids double WebRTC processing).
+      // Two captures: a raw stream for accurate pitch analysis (no echo
+      // cancellation) and a separate echo-cancelled stream for the agent uplink
+      // so the model does not hear the backing track or its own voice.
       await localParticipant.setMicrophoneEnabled(false);
-      const stream = await captureVocalMicStream();
-      micStreamRef.current = stream;
-      await start(stream);
+      const rawStream = await captureVocalMicStream();
+      micStreamRef.current = rawStream;
+      const uplinkStream = await captureUplinkMicStream();
+      const fanout = createMicFanout(rawStream, uplinkStream);
+      micFanoutRef.current = fanout;
+      setMicFanout(fanout);
+      await start(fanout.analyzerStream);
 
-      const mediaTrack = stream.getAudioTracks()[0];
-      const pub = await localParticipant.publishTrack(mediaTrack, {
+      const uplinkTrack = fanout.uplinkStream.getAudioTracks()[0];
+      const pub = await localParticipant.publishTrack(uplinkTrack, {
         source: Track.Source.Microphone,
       });
       micPubRef.current = pub;
@@ -1036,6 +1164,9 @@ export default function VocalDashboard() {
         await songPlayback.start();
       }
     } catch (err) {
+      micFanoutRef.current?.dispose();
+      micFanoutRef.current = null;
+      setMicFanout(null);
       micStreamRef.current?.getTracks().forEach((t) => t.stop());
       micStreamRef.current = null;
       stop();
@@ -1160,6 +1291,19 @@ export default function VocalDashboard() {
                 <Plus className="h-3 w-3" />
               </button>
             </div>
+          )}
+
+          {isActive && coachingMode === "karaoke" && (
+            <button
+              onClick={() =>
+                void restartSong("Restarting the song from the beginning.")
+              }
+              title="Restart song from the beginning"
+              className="shrink-0 flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/15 px-4 py-2 text-sm font-semibold text-violet-300 transition-all duration-300 hover:bg-violet-500/25"
+            >
+              <RotateCcw className="h-4 w-4" />
+              <span className="hidden sm:inline">Restart</span>
+            </button>
           )}
 
           <button
