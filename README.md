@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="images/logo.jpg" alt="AI Vocal Coach logo" width="160" />
+  <img
+    src="https://raw.githubusercontent.com/SYNTHOSOLO/SingRight/main/images/logo.png"
+    alt="AI Vocal Coach logo"
+    width="160"
+  />
 </p>
 
 <h1 align="center">Interactive AI Vocal Coach</h1>
