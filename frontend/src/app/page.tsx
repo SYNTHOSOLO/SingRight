@@ -22,6 +22,7 @@ export default function HomePage() {
   const [token, setToken] = useState("");
   const [isJoined, setIsJoined] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
 
   // Auto-read token from URL search params (e.g. ?token=xxx)
   useEffect(() => {
@@ -33,14 +34,36 @@ export default function HomePage() {
     if (s) setServerUrl(s);
   }, []);
 
-  const handleJoin = () => {
-    if (!token.trim() || !serverUrl.trim()) return;
+  const handleJoin = async () => {
+    if (!serverUrl.trim()) {
+      setError("Server URL is required");
+      return;
+    }
     setIsLoading(true);
-    // Tiny artificial delay to show loading state, then mount the room
-    setTimeout(() => {
-      setIsJoined(true);
-      setIsLoading(false);
-    }, 600);
+    setError("");
+
+    let activeToken = token.trim();
+
+    // If no token is provided in the input, auto-generate one from our API route
+    if (!activeToken) {
+      try {
+        const res = await fetch(`/api/token?room=coaching-room`);
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "Failed to generate token");
+        }
+        const data = await res.json();
+        activeToken = data.token;
+        setToken(activeToken);
+      } catch (err: any) {
+        setError(err.message || "Failed to fetch access token from backend api route");
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    setIsJoined(true);
+    setIsLoading(false);
   };
 
   // ── Connected: render the dashboard inside the LiveKit room ─────────
@@ -69,6 +92,13 @@ export default function HomePage() {
           </p>
         </div>
 
+        {/* Error Display */}
+        {error && (
+          <div className="mb-6 rounded-lg bg-rose-500/10 border border-rose-500/25 p-3 text-center text-xs font-semibold text-rose-400">
+            {error}
+          </div>
+        )}
+
         {/* Form */}
         <div className="flex flex-col gap-4">
           <label className="flex flex-col gap-1.5">
@@ -85,21 +115,26 @@ export default function HomePage() {
           </label>
 
           <label className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-[var(--color-text-secondary)]">
-              Access Token
-            </span>
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+                Access Token
+              </span>
+              <span className="text-[10px] text-[var(--color-text-muted)] italic">
+                Optional (auto-generated if empty)
+              </span>
+            </div>
             <input
               type="text"
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="Paste your LiveKit JWT token"
+              placeholder="Leave empty to auto-generate"
               className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-surface-secondary)] px-4 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-violet-500/50 focus:outline-none focus:ring-1 focus:ring-violet-500/30"
             />
           </label>
 
           <button
             onClick={handleJoin}
-            disabled={!token.trim() || !serverUrl.trim() || isLoading}
+            disabled={!serverUrl.trim() || isLoading}
             className="group mt-2 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-violet-600/20 transition-all duration-300 hover:shadow-xl hover:shadow-violet-600/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isLoading ? (
