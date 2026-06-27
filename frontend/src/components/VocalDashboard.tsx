@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useDataChannel, useConnectionState, useTranscriptions } from "@livekit/components-react";
+import { useDataChannel, useConnectionState, useTranscriptions, useLocalParticipant } from "@livekit/components-react";
 import { ConnectionState } from "livekit-client";
 import {
   Mic,
@@ -19,14 +19,22 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
+import { useKaraokeBackingTrack } from "@/hooks/useKaraokeBackingTrack";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const TELEMETRY_INTERVAL_MS = 250; // how often we send metrics to the agent
+const DISPLAY_UPDATE_MS = 100; // throttle UI meter updates to reduce flicker
 const VOLUME_SILENCE_THRESHOLD_DB = -60;
+const VOLUME_WARN_CLEAR_DB = -55; // hysteresis: clear warn above this
 const PITCH_DEVIATION_HZ = 200; // deviation from target that triggers error
+const PITCH_WARN_CLEAR_HZ = 180; // hysteresis: clear warn below this
+const PITCH_HOLD_MS = 250; // keep last pitch briefly when detection drops out
+const METRIC_SMOOTHING = 0.35; // EMA factor for displayed values (0–1)
+const AUTO_FAULT_COOLDOWN_MS = 5000;
+const AUTO_FAULT_DELAY_MS = 1500;
 
 /** Sample lyrics for the karaoke display. */
 const LYRICS = [
@@ -67,6 +75,7 @@ export default function VocalDashboard() {
   // ── LiveKit connection state ──────────────────────────────────────────
   const connectionState = useConnectionState();
   const isConnected = connectionState === ConnectionState.Connected;
+  const { microphoneTrack } = useLocalParticipant();
 
   // ── Dashboard state ──────────────────────────────────────────────────
   const [coachingMode, setCoachingMode] = useState<"karaoke" | "conversational">("karaoke");
@@ -77,16 +86,27 @@ export default function VocalDashboard() {
   >("idle");
   const [currentLyricIdx, setCurrentLyricIdx] = useState(0);
   const [sessionElapsed, setSessionElapsed] = useState(0);
-  const [latestMetrics, setLatestMetrics] = useState<VocalMetrics>({
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [displayMetrics, setDisplayMetrics] = useState<VocalMetrics>({
     volumeDb: -100,
     frequencyHz: 0,
   });
-  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [isVolumeWarn, setIsVolumeWarn] = useState(false);
+  const [isPitchWarn, setIsPitchWarn] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
 
   // Refs for interval / telemetry gating
   const metricsRef = useRef<VocalMetrics>({ volumeDb: -100, frequencyHz: 0 });
   const isPausedRef = useRef(false);
+  const lastAutoFaultRef = useRef(0);
+  const coachingModeRef = useRef(coachingMode);
+  coachingModeRef.current = coachingMode;
   isPausedRef.current = isPaused;
+
+  // Smoothed display refs (updated every frame, flushed to state on an interval)
+  const smoothedRef = useRef({ volumeDb: -100, frequencyHz: 0 });
+  const lastPitchAtRef = useRef(0);
+  const lastDisplayFlushRef = useRef(0);
 
   // ── Data channel: send & receive ──────────────────────────────────────
   const onDataReceived = useCallback(
@@ -117,16 +137,83 @@ export default function VocalDashboard() {
   );
 
   const { send: sendData } = useDataChannel("session_control", onDataReceived);
+  const { send: sendTelemetry } = useDataChannel("telemetry");
+
+  const backingTrack = useKaraokeBackingTrack({
+    enabled: coachingMode === "karaoke",
+    isPaused,
+  });
 
   // ── Vocal analyser hook ───────────────────────────────────────────────
   const onMetricsUpdate = useCallback((m: VocalMetrics) => {
     metricsRef.current = m;
-    setLatestMetrics(m);
+
+    const now = performance.now();
+    const smoothed = smoothedRef.current;
+
+    smoothed.volumeDb +=
+      (m.volumeDb - smoothed.volumeDb) * METRIC_SMOOTHING;
+
+    if (m.frequencyHz > 0) {
+      lastPitchAtRef.current = now;
+      if (smoothed.frequencyHz === 0) {
+        smoothed.frequencyHz = m.frequencyHz;
+      } else {
+        smoothed.frequencyHz +=
+          (m.frequencyHz - smoothed.frequencyHz) * METRIC_SMOOTHING;
+      }
+    } else if (now - lastPitchAtRef.current > PITCH_HOLD_MS) {
+      smoothed.frequencyHz +=
+        (0 - smoothed.frequencyHz) * METRIC_SMOOTHING;
+      if (smoothed.frequencyHz < 1) smoothed.frequencyHz = 0;
+    }
+
+    if (now - lastDisplayFlushRef.current < DISPLAY_UPDATE_MS) return;
+    lastDisplayFlushRef.current = now;
+
+    const displayVolume = Math.round(smoothed.volumeDb * 10) / 10;
+    const displayPitch =
+      smoothed.frequencyHz >= 1
+        ? Math.round(smoothed.frequencyHz * 10) / 10
+        : 0;
+
+    setDisplayMetrics({
+      volumeDb: displayVolume,
+      frequencyHz: displayPitch,
+    });
+
+    setIsVolumeWarn((prev) => {
+      if (!prev && displayVolume < VOLUME_SILENCE_THRESHOLD_DB) return true;
+      if (prev && displayVolume >= VOLUME_WARN_CLEAR_DB) return false;
+      return prev;
+    });
+
+    const deviation =
+      displayPitch > 0 ? Math.abs(displayPitch - TARGET_PITCH_HZ) : 0;
+    setIsPitchWarn((prev) => {
+      if (!prev && deviation > PITCH_DEVIATION_HZ && displayPitch > 0) {
+        return true;
+      }
+      if (prev && (deviation < PITCH_WARN_CLEAR_HZ || displayPitch === 0)) {
+        return false;
+      }
+      return prev;
+    });
   }, []);
 
-  const { isActive, metrics, analyserNode, start, stop } = useVocalAnalyzer({
+  const { isActive, analyserNode, error: analyzerError, start, stop } = useVocalAnalyzer({
     onMetricsUpdate,
   });
+
+  useEffect(() => {
+    if (isActive) return;
+    smoothedRef.current = { volumeDb: -100, frequencyHz: 0 };
+    lastPitchAtRef.current = 0;
+    lastDisplayFlushRef.current = 0;
+    setDisplayMetrics({ volumeDb: -100, frequencyHz: 0 });
+    setIsVolumeWarn(false);
+    setIsPitchWarn(false);
+  }, [isActive]);
 
   // ── Canvas Waveform Visualizer ─────────────────────────────────────────
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -195,7 +282,6 @@ export default function VocalDashboard() {
     if (!isConnected || !isActive) return;
 
     const id = setInterval(() => {
-      // Gate: do NOT send while paused to prevent infinite loops
       if (isPausedRef.current) return;
 
       const m = metricsRef.current;
@@ -203,60 +289,136 @@ export default function VocalDashboard() {
         type: "VOCAL_METRICS",
         volume_db: m.volumeDb,
         pitch_hz: m.frequencyHz,
+        coaching_mode: coachingModeRef.current,
       });
 
-      sendData(new TextEncoder().encode(packet), { reliable: false });
+      sendTelemetry(new TextEncoder().encode(packet), { reliable: false });
     }, TELEMETRY_INTERVAL_MS);
 
     return () => clearInterval(id);
-  }, [isConnected, isActive, sendData]);
+  }, [isConnected, isActive, sendTelemetry]);
 
-  // ── Simulated lyric timer ─────────────────────────────────────────────
+  // ── Notify agent of coaching mode changes ─────────────────────────────
+  useEffect(() => {
+    if (!isConnected) return;
+    const packet = JSON.stringify({ type: "COACHING_MODE", mode: coachingMode });
+    sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+  }, [coachingMode, isConnected, sendTelemetry]);
+
+  // ── Lyric timer synced to backing track (karaoke) or wall clock ───────
   useEffect(() => {
     if (isPaused || !isActive) return;
 
     const id = setInterval(() => {
+      const elapsed =
+        coachingMode === "karaoke"
+          ? Math.floor(backingTrack.getCurrentTime())
+          : undefined;
+
       setSessionElapsed((prev) => {
-        const next = prev + 1;
-        // Advance lyric index
+        const next = elapsed ?? prev + 1;
         const idx = LYRICS.findLastIndex((l) => l.time <= next);
         if (idx >= 0) setCurrentLyricIdx(idx);
         return next;
       });
-    }, 1000);
+    }, coachingMode === "karaoke" ? 100 : 1000);
 
     return () => clearInterval(id);
-  }, [isPaused, isActive]);
+  }, [isPaused, isActive, coachingMode, backingTrack]);
 
-  // ── Derived values ────────────────────────────────────────────────────
-  const volumePct = dbToPercent(latestMetrics.volumeDb);
-  const pitchPct = pitchToPercent(latestMetrics.frequencyHz);
+  // ── Derived values (smoothed for stable meter rendering) ──────────────
+  const volumePct = dbToPercent(displayMetrics.volumeDb);
+  const pitchPct = pitchToPercent(displayMetrics.frequencyHz);
   const pitchDeviation =
-    latestMetrics.frequencyHz > 0
-      ? Math.abs(latestMetrics.frequencyHz - TARGET_PITCH_HZ)
+    displayMetrics.frequencyHz > 0
+      ? Math.abs(displayMetrics.frequencyHz - TARGET_PITCH_HZ)
       : 0;
-  const isVolumeWarn = latestMetrics.volumeDb < VOLUME_SILENCE_THRESHOLD_DB;
-  const isPitchWarn = pitchDeviation > PITCH_DEVIATION_HZ && latestMetrics.frequencyHz > 0;
 
-  // ── Simulate fault handler ────────────────────────────────────────────
-  const simulateFault = useCallback(
-    (reason: string) => {
+  const sendCriticalError = useCallback(
+    (reason: string, bypassCooldown = false) => {
       if (!isConnected) return;
+      const now = Date.now();
+      if (!bypassCooldown && now - lastAutoFaultRef.current < AUTO_FAULT_COOLDOWN_MS) {
+        return;
+      }
+      lastAutoFaultRef.current = now;
+
       const packet = JSON.stringify({
         type: "CRITICAL_ERROR",
         reason,
       });
-      sendData(new TextEncoder().encode(packet), { reliable: true });
+      sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
     },
-    [isConnected, sendData]
+    [isConnected, sendTelemetry]
   );
+
+  // ── Auto-detect sustained vocal faults ────────────────────────────────
+  useEffect(() => {
+    if (!isConnected || !isActive || isPaused) return;
+
+    const timers: ReturnType<typeof setTimeout>[] = [];
+
+    if (isVolumeWarn) {
+      timers.push(
+        setTimeout(() => sendCriticalError("VOLUME_SILENCE"), AUTO_FAULT_DELAY_MS)
+      );
+    }
+    if (isPitchWarn) {
+      timers.push(
+        setTimeout(
+          () => sendCriticalError("PITCH_DISTORTION_OUT_OF_BOUNDS"),
+          AUTO_FAULT_DELAY_MS
+        )
+      );
+    }
+
+    return () => timers.forEach(clearTimeout);
+  }, [isVolumeWarn, isPitchWarn, isConnected, isActive, isPaused, sendCriticalError]);
 
   // ── Request Feedback ─────────────────────────────────────────────────
   const requestFeedback = useCallback(() => {
     if (!isConnected) return;
     const packet = JSON.stringify({ type: "REQUEST_FEEDBACK" });
-    sendData(new TextEncoder().encode(packet), { reliable: true });
-  }, [isConnected, sendData]);
+    sendTelemetry(new TextEncoder().encode(packet), { reliable: true });
+  }, [isConnected, sendTelemetry]);
+
+  const handleSessionToggle = useCallback(async () => {
+    if (isActive) {
+      backingTrack.stop();
+      stop();
+      setSessionElapsed(0);
+      setCurrentLyricIdx(0);
+      setMicError(null);
+      return;
+    }
+
+    setMicError(null);
+    try {
+      const track = microphoneTrack?.track;
+      const stream = track
+        ? new MediaStream([track.mediaStreamTrack])
+        : undefined;
+      await start(stream);
+
+      if (coachingMode === "karaoke") {
+        await backingTrack.start();
+      }
+    } catch (err) {
+      setMicError(
+        err instanceof Error ? err.message : "Failed to start microphone."
+      );
+    }
+  }, [isActive, backingTrack, stop, microphoneTrack, start, coachingMode]);
+
+  // Start/stop backing track when coaching mode changes mid-session
+  useEffect(() => {
+    if (!isActive) return;
+    if (coachingMode === "karaoke") {
+      void backingTrack.start();
+    } else {
+      backingTrack.stop();
+    }
+  }, [coachingMode, isActive, backingTrack]);
 
   // ── Render ────────────────────────────────────────────────────────────
   return (
@@ -304,7 +466,7 @@ export default function VocalDashboard() {
           </div>
 
           <button
-            onClick={isActive ? stop : start}
+            onClick={handleSessionToggle}
             className={`group relative flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold transition-all duration-300 ${
               isActive
                 ? "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 border border-rose-500/30"
@@ -325,6 +487,19 @@ export default function VocalDashboard() {
           </button>
         </div>
       </header>
+
+      {/* ── Mic error ─────────────────────────────────────────────────── */}
+      {(micError || analyzerError) && (
+        <div className="alert-overlay glass-card glow-rose flex items-start gap-3 border-rose-500/30 p-4">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
+          <div>
+            <p className="text-sm font-semibold text-rose-300">Microphone Error</p>
+            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+              {micError ?? analyzerError}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* ── Alert Overlay ─────────────────────────────────────────────── */}
       {alertMessage && (
@@ -496,7 +671,9 @@ export default function VocalDashboard() {
                   </p>
                 ) : (
                   transcriptions.map((t, idx) => {
-                    const isAgent = t.participantInfo?.identity?.includes("agent") || t.participantInfo?.identity === "";
+                    const identity = t.participantInfo?.identity ?? "";
+                    const isAgent =
+                      identity.includes("agent") || identity.startsWith("agent-");
                     return (
                       <div key={idx} className="flex flex-col gap-0.5 text-xs">
                         <span className={`font-semibold ${isAgent ? "text-cyan-400" : "text-violet-400"}`}>
@@ -522,7 +699,7 @@ export default function VocalDashboard() {
                 Volume
               </h2>
               <span className="ml-auto font-mono text-xs text-[var(--color-text-muted)]">
-                {latestMetrics.volumeDb.toFixed(1)} dB
+                {displayMetrics.volumeDb.toFixed(1)} dB
               </span>
             </div>
             <div className="px-5 py-4">
@@ -548,8 +725,8 @@ export default function VocalDashboard() {
                 Pitch
               </h2>
               <span className="ml-auto font-mono text-xs text-[var(--color-text-muted)]">
-                {latestMetrics.frequencyHz > 0
-                  ? `${latestMetrics.frequencyHz.toFixed(1)} Hz`
+                {displayMetrics.frequencyHz > 0
+                  ? `${displayMetrics.frequencyHz.toFixed(1)} Hz`
                   : "—"}
               </span>
             </div>
@@ -562,7 +739,7 @@ export default function VocalDashboard() {
               </div>
               <div className="mt-2 flex items-center justify-between text-xs text-[var(--color-text-muted)]">
                 <span>Target: {TARGET_PITCH_HZ} Hz</span>
-                {latestMetrics.frequencyHz > 0 && (
+                {displayMetrics.frequencyHz > 0 && (
                   <span
                     className={
                       isPitchWarn ? "text-rose-400" : "text-emerald-400"
@@ -623,7 +800,7 @@ export default function VocalDashboard() {
             <div className="flex flex-col gap-2 px-5 py-4">
               <button
                 disabled={!isConnected}
-                onClick={() => simulateFault("VOLUME_SILENCE")}
+                onClick={() => sendCriticalError("VOLUME_SILENCE", true)}
                 className="flex items-center justify-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-amber-400 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <AlertTriangle className="h-3.5 w-3.5" />
@@ -632,7 +809,7 @@ export default function VocalDashboard() {
               <button
                 disabled={!isConnected}
                 onClick={() =>
-                  simulateFault("PITCH_DISTORTION_OUT_OF_BOUNDS")
+                  sendCriticalError("PITCH_DISTORTION_OUT_OF_BOUNDS", true)
                 }
                 className="flex items-center justify-center gap-2 rounded-lg border border-rose-500/20 bg-rose-500/10 px-4 py-2 text-xs font-semibold text-rose-400 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >

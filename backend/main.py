@@ -8,8 +8,10 @@ session-control data-channel directives when critical vocal faults are detected.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -110,7 +112,6 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     logger.info("Connected to room %s", ctx.room.name)
 
-    # ── Build the Realtime model ──────────────────────────────────────────
     openai_realtime = realtime.RealtimeModel(
         voice="shimmer",
         modalities=["audio", "text"],
@@ -122,20 +123,50 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    # ── Instantiate the agent & start session ─────────────────────────────
     agent = VocalCoachAgent()
     session = AgentSession(
         llm=openai_realtime,
     )
 
-    # ── Data-channel telemetry listener ───────────────────────────────────
+    # Throttle telemetry injections to avoid flooding the chat context.
+    last_telemetry_at = 0.0
+    telemetry_lock = asyncio.Lock()
+    coaching_mode = "karaoke"
+
+    async def inject_telemetry(metrics: dict) -> None:
+        nonlocal last_telemetry_at
+
+        now = time.monotonic()
+        if now - last_telemetry_at < 2.0:
+            return
+
+        async with telemetry_lock:
+            if now - last_telemetry_at < 2.0:
+                return
+
+            volume_db = metrics.get("volume_db", 0)
+            pitch_hz = metrics.get("pitch_hz", 0)
+            mode = metrics.get("coaching_mode", coaching_mode)
+
+            telemetry_context = (
+                f"[LIVE TELEMETRY — {mode} mode] Student vocal snapshot — "
+                f"Volume: {volume_db:.1f} dB, Pitch: {pitch_hz:.1f} Hz."
+            )
+
+            chat_ctx = agent.chat_ctx.copy()
+            chat_ctx.add_message(role="system", content=telemetry_context)
+            await agent.update_chat_ctx(chat_ctx)
+
+            last_telemetry_at = now
+            logger.debug(
+                "Injected telemetry: vol=%.1f dB, pitch=%.1f Hz, mode=%s",
+                volume_db,
+                pitch_hz,
+                mode,
+            )
+
     @ctx.room.on("data_received")
     def _on_data_received(packet: rtc.DataPacket) -> None:
-        """
-        Decode inbound data-channel frames from the client.
-        Routes VOCAL_METRICS into the conversation context and
-        CRITICAL_ERROR into the barge-in interruption pipeline.
-        """
         try:
             raw = packet.data.decode("utf-8")
             message = json.loads(raw)
@@ -146,15 +177,18 @@ async def entrypoint(ctx: JobContext) -> None:
         msg_type = message.get("type")
 
         if msg_type == "VOCAL_METRICS":
-            _handle_vocal_metrics(session, message)
+            asyncio.create_task(inject_telemetry(message))
+        elif msg_type == "COACHING_MODE":
+            nonlocal coaching_mode
+            coaching_mode = message.get("mode", coaching_mode)
+            logger.info("Coaching mode set to %s", coaching_mode)
         elif msg_type == "CRITICAL_ERROR":
-            ctx.create_task(_handle_critical_error(session, ctx, message))
+            asyncio.create_task(_handle_critical_error(session, ctx, message))
         elif msg_type == "REQUEST_FEEDBACK":
-            ctx.create_task(_handle_request_feedback(session, ctx))
+            asyncio.create_task(_handle_request_feedback(session, ctx))
         else:
             logger.debug("Unknown data-channel message type: %s", msg_type)
 
-    # ── Start the agent session ───────────────────────────────────────────
     participant = await ctx.wait_for_participant()
     await session.start(
         room=ctx.room,
@@ -205,23 +239,8 @@ async def _handle_request_feedback(session: AgentSession, ctx: JobContext) -> No
 
 
 # ---------------------------------------------------------------------------
-# Telemetry Handlers
+# Critical Error Handler
 # ---------------------------------------------------------------------------
-
-def _handle_vocal_metrics(session: AgentSession, metrics: dict) -> None:
-    """Inject latest telemetry snapshot into the conversation context."""
-    volume_db = metrics.get("volume_db", 0)
-    pitch_hz = metrics.get("pitch_hz", 0)
-
-    telemetry_context = (
-        f"[LIVE TELEMETRY] Student vocal snapshot — "
-        f"Volume: {volume_db:.1f} dB, Pitch: {pitch_hz:.1f} Hz."
-    )
-    session.update_chat_ctx(
-        session.chat_ctx.append(role="system", text=telemetry_context)
-    )
-    logger.debug("Injected telemetry: vol=%.1f dB, pitch=%.1f Hz", volume_db, pitch_hz)
-
 
 async def _handle_critical_error(
     session: AgentSession,

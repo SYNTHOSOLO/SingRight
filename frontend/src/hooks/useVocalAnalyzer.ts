@@ -2,58 +2,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface VocalMetrics {
-  /** Volume in decibels (typically -100 … 0). */
   volumeDb: number;
-  /** Estimated fundamental frequency in Hz (0 when undetectable). */
   frequencyHz: number;
 }
 
 export interface UseVocalAnalyzerOptions {
-  /** FFT size for the AnalyserNode (must be a power of 2). Default 2048. */
   fftSize?: number;
-  /** Minimum RMS threshold below which pitch detection is skipped. */
   silenceThreshold?: number;
-  /** Called on every animation frame with the latest metrics. */
   onMetricsUpdate?: (metrics: VocalMetrics) => void;
 }
 
 export interface UseVocalAnalyzerReturn {
-  /** Whether the mic stream is active. */
   isActive: boolean;
-  /** Latest computed metrics snapshot. */
   metrics: VocalMetrics;
-  /** Expose the raw AnalyserNode for audio visualization. */
   analyserNode: AnalyserNode | null;
-  /** Start mic capture & analysis. */
-  start: () => Promise<void>;
-  /** Stop mic capture & analysis. */
+  error: string | null;
+  start: (externalStream?: MediaStream) => Promise<void>;
   stop: () => void;
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 
 const DEFAULT_FFT_SIZE = 2048;
 const DEFAULT_SILENCE_THRESHOLD = 0.01;
 const MIN_DETECTABLE_HZ = 60;
 const MAX_DETECTABLE_HZ = 1200;
 
-// ---------------------------------------------------------------------------
-// Autocorrelation Pitch Detector
-// ---------------------------------------------------------------------------
-
-/**
- * Basic autocorrelation-based pitch detector.
- * Operates on a time-domain float buffer from the AnalyserNode.
- * Returns the estimated fundamental frequency in Hz, or 0 if no clear
- * pitch is detected.
- */
 function detectPitchAutocorrelation(
   buffer: Float32Array,
   sampleRate: number,
@@ -61,7 +34,6 @@ function detectPitchAutocorrelation(
 ): number {
   const n = buffer.length;
 
-  // ── RMS gate: skip pitch detection if the signal is too quiet ──────
   let rms = 0;
   for (let i = 0; i < n; i++) {
     rms += buffer[i] * buffer[i];
@@ -69,13 +41,11 @@ function detectPitchAutocorrelation(
   rms = Math.sqrt(rms / n);
   if (rms < silenceThreshold) return 0;
 
-  // ── Normalise ─────────────────────────────────────────────────────
   const normalised = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     normalised[i] = buffer[i];
   }
 
-  // ── Trim leading/trailing near-silence for cleaner autocorrelation ─
   let trimStart = 0;
   let trimEnd = n - 1;
   const trimThreshold = 0.2;
@@ -90,7 +60,6 @@ function detectPitchAutocorrelation(
   const trimmed = normalised.subarray(trimStart, trimEnd + 1);
   const len = trimmed.length;
 
-  // ── Autocorrelation ────────────────────────────────────────────────
   const minLag = Math.floor(sampleRate / MAX_DETECTABLE_HZ);
   const maxLag = Math.floor(sampleRate / MIN_DETECTABLE_HZ);
 
@@ -102,7 +71,6 @@ function detectPitchAutocorrelation(
     for (let i = 0; i < len - lag; i++) {
       correlation += trimmed[i] * trimmed[i + lag];
     }
-    // Normalise by overlap length
     correlation /= len - lag;
 
     if (correlation > bestCorrelation) {
@@ -111,10 +79,8 @@ function detectPitchAutocorrelation(
     }
   }
 
-  // Require a minimum correlation confidence
   if (bestLag === -1 || bestCorrelation < 0.01) return 0;
 
-  // ── Parabolic interpolation for sub-sample accuracy ────────────────
   let refinedLag = bestLag;
   if (bestLag > minLag && bestLag < Math.min(maxLag, len - 1)) {
     const corrPrev = (() => {
@@ -132,7 +98,9 @@ function detectPitchAutocorrelation(
       return c / (len - bestLag - 1);
     })();
 
-    const shift = (corrPrev - corrNext) / (2 * (corrPrev - 2 * bestCorrelation + corrNext));
+    const shift =
+      (corrPrev - corrNext) /
+      (2 * (corrPrev - 2 * bestCorrelation + corrNext));
     if (isFinite(shift)) {
       refinedLag = bestLag + shift;
     }
@@ -144,10 +112,6 @@ function detectPitchAutocorrelation(
   return Math.round(frequency * 10) / 10;
 }
 
-// ---------------------------------------------------------------------------
-// Hook
-// ---------------------------------------------------------------------------
-
 export function useVocalAnalyzer(
   options: UseVocalAnalyzerOptions = {}
 ): UseVocalAnalyzerReturn {
@@ -158,12 +122,13 @@ export function useVocalAnalyzer(
   } = options;
 
   const [isActive, setIsActive] = useState(false);
+  const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<VocalMetrics>({
     volumeDb: -100,
     frequencyHz: 0,
   });
 
-  // Stable references to avoid re-render churn
   const callbackRef = useRef(onMetricsUpdate);
   callbackRef.current = onMetricsUpdate;
 
@@ -171,9 +136,9 @@ export function useVocalAnalyzer(
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const ownsStreamRef = useRef(false);
   const rafIdRef = useRef<number>(0);
 
-  // ── Analysis loop ──────────────────────────────────────────────────
   const tick = useCallback(() => {
     const analyser = analyserRef.current;
     const audioCtx = audioCtxRef.current;
@@ -183,16 +148,13 @@ export function useVocalAnalyzer(
     const timeDomain = new Float32Array(bufferLength);
     analyser.getFloatTimeDomainData(timeDomain);
 
-    // ── RMS → dB ─────────────────────────────────────────────────────
     let sumSq = 0;
     for (let i = 0; i < bufferLength; i++) {
       sumSq += timeDomain[i] * timeDomain[i];
     }
     const rms = Math.sqrt(sumSq / bufferLength);
-    const volumeDb =
-      rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
+    const volumeDb = rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
 
-    // ── Pitch ────────────────────────────────────────────────────────
     const frequencyHz = detectPitchAutocorrelation(
       timeDomain,
       audioCtx.sampleRate,
@@ -204,65 +166,91 @@ export function useVocalAnalyzer(
       frequencyHz,
     };
 
-    setMetrics(snapshot);
     callbackRef.current?.(snapshot);
-
     rafIdRef.current = requestAnimationFrame(tick);
   }, [silenceThreshold]);
 
-  // ── Start ──────────────────────────────────────────────────────────
-  const start = useCallback(async () => {
-    if (isActive) return;
+  const start = useCallback(
+    async (externalStream?: MediaStream) => {
+      if (isActive) return;
+      setError(null);
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: false,
-      },
-    });
+      try {
+        let stream = externalStream ?? null;
+        ownsStreamRef.current = !stream;
 
-    const audioCtx = new AudioContext();
-    const source = audioCtx.createMediaStreamSource(stream);
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = fftSize;
-    analyser.smoothingTimeConstant = 0.3;
-    source.connect(analyser);
+        if (!stream) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: false,
+            },
+          });
+        }
 
-    audioCtxRef.current = audioCtx;
-    analyserRef.current = analyser;
-    sourceRef.current = source;
-    streamRef.current = stream;
+        const audioCtx = new AudioContext();
+        await audioCtx.resume();
 
-    setIsActive(true);
-    rafIdRef.current = requestAnimationFrame(tick);
-  }, [isActive, fftSize, tick]);
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = fftSize;
+        analyser.smoothingTimeConstant = 0.3;
+        source.connect(analyser);
 
-  // ── Stop ───────────────────────────────────────────────────────────
+        audioCtxRef.current = audioCtx;
+        analyserRef.current = analyser;
+        sourceRef.current = source;
+        streamRef.current = stream;
+        setAnalyserNode(analyser);
+
+        setIsActive(true);
+        rafIdRef.current = requestAnimationFrame(tick);
+      } catch (err) {
+        const message =
+          err instanceof DOMException && err.name === "NotAllowedError"
+            ? "Microphone access denied. Please allow mic permissions and try again."
+            : err instanceof Error
+            ? err.message
+            : "Failed to start microphone capture.";
+        setError(message);
+        throw err;
+      }
+    },
+    [isActive, fftSize, tick]
+  );
+
   const stop = useCallback(() => {
     cancelAnimationFrame(rafIdRef.current);
     sourceRef.current?.disconnect();
     analyserRef.current?.disconnect();
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+
+    if (ownsStreamRef.current) {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    }
+
     audioCtxRef.current?.close();
 
     audioCtxRef.current = null;
     analyserRef.current = null;
     sourceRef.current = null;
     streamRef.current = null;
+    ownsStreamRef.current = false;
+    setAnalyserNode(null);
 
     setIsActive(false);
     setMetrics({ volumeDb: -100, frequencyHz: 0 });
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       cancelAnimationFrame(rafIdRef.current);
-      streamRef.current?.getTracks().forEach((t) => t.stop());
+      if (ownsStreamRef.current) {
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+      }
       audioCtxRef.current?.close();
     };
   }, []);
 
-  return { isActive, metrics, analyserNode: analyserRef.current, start, stop };
+  return { isActive, metrics, analyserNode, error, start, stop };
 }
