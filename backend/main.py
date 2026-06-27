@@ -67,8 +67,9 @@ class VocalCoachAgent(Agent):
         "offer brief positive reinforcement."
     )
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: "JobContext") -> None:
         super().__init__(instructions=self.SYSTEM_INSTRUCTIONS)
+        self._ctx = ctx
 
     @llm.function_tool(
         description=(
@@ -88,12 +89,9 @@ class VocalCoachAgent(Agent):
             action: The playback control action. Must be one of: PAUSE_TRACK, RESUME_TRACK, SHOW_TIPS.
             coach_notes: A short coaching note or tip to display to the student in the UI alongside the action.
         """
-        session: AgentSession | None = self.session
-        if session is None or session.room is None:
-            return "No active room session — cannot dispatch directive."
-
+        room = self._ctx.room
         directive = json.dumps({"action": action, "coach_notes": coach_notes})
-        await session.room.local_participant.publish_data(
+        await room.local_participant.publish_data(
             payload=directive.encode("utf-8"),
             topic="session_control",
             reliable=True,
@@ -123,7 +121,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    agent = VocalCoachAgent()
+    agent = VocalCoachAgent(ctx=ctx)
     session = AgentSession(
         llm=openai_realtime,
     )
@@ -304,4 +302,4 @@ async def _handle_critical_error(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="vocal-coach"))
