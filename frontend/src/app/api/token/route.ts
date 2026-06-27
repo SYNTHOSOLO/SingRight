@@ -24,21 +24,20 @@ export async function GET(request: Request) {
   try {
     const at = new AccessToken(apiKey, apiSecret, { identity });
 
-    // roomAgentDispatch tells the LiveKit server to dispatch the named agent
-    // "vocal-coach" exactly ONCE when this participant joins — no duplicates.
-    (at as any).grants = {
-      video: {
-        roomJoin: true,
-        room,
-        canPublish: true,
-        canSubscribe: true,
-        canPublishData: true,
-        roomAgentDispatch: {
-          agentName: "vocal-coach",
-          metadata: JSON.stringify({ participant: identity }),
-        },
+    // addGrant with `as any` so TypeScript doesn't block the roomAgentDispatch
+    // field, which is valid in the JWT spec but missing from the SDK's TS types.
+    // The agentName "vocal-coach" matches our backend WorkerOptions(agent_name="vocal-coach").
+    at.addGrant({
+      roomJoin: true,
+      room,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+      roomAgentDispatch: {
+        agentName: "vocal-coach",
+        metadata: JSON.stringify({ participant: identity }),
       },
-    };
+    } as any);
 
     const token = await at.toJwt();
 
@@ -47,3 +46,4 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+  
