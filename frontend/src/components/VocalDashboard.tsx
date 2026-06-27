@@ -28,13 +28,15 @@ import {
   EyeOff,
   Guitar,
   Piano,
+  Minus,
+  Plus,
 } from "lucide-react";
 import { useVocalAnalyzer, VocalMetrics } from "@/hooks/useVocalAnalyzer";
 import { useSongPlayback } from "@/hooks/useSongPlayback";
 import { useSyllableTracker } from "@/hooks/useSyllableTracker";
 import { useTonePlayer } from "@/hooks/useTonePlayer";
 import { SONG_EN001A } from "@/lib/songs/en001a";
-import { VOLUME_SILENCE_THRESHOLD_DB } from "@/lib/songs/pitch";
+import { VOLUME_SILENCE_THRESHOLD_DB, shiftHz } from "@/lib/songs/pitch";
 import PitchLane from "@/components/PitchLane";
 import PitchContourChart from "@/components/PitchContourChart";
 import PerformanceIssues from "@/components/PerformanceIssues";
@@ -54,7 +56,7 @@ const TELEMETRY_INTERVAL_MS = 250; // how often we send metrics to the agent
 const DISPLAY_UPDATE_MS = 100; // throttle UI meter updates to reduce flicker
 const VOLUME_WARN_CLEAR_DB = -55;
 const PITCH_HOLD_MS = 250;
-const METRIC_SMOOTHING = 0.35;
+const METRIC_SMOOTHING = 0.6; // higher = faster tracking (MPM already has internal median filtering)
 const AUTO_FAULT_COOLDOWN_MS = 5000;
 const AUTO_FAULT_DELAY_MS = 1500;
 const VISUAL_CUE_FADE_MS = 3500;
@@ -173,6 +175,8 @@ export default function VocalDashboard() {
   const [visualCue, setVisualCue] = useState<VisualCue | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [coachNotes, setCoachNotes] = useState<string | null>(null);
+  const [keyShift, setKeyShift] = useState(0);
+  const [guideMelodyEnabled, setGuideMelodyEnabled] = useState(true);
   const [coachStatus, setCoachStatus] = useState<
     "idle" | "speaking" | "paused"
   >("idle");
@@ -464,6 +468,7 @@ export default function VocalDashboard() {
     livePitchHz: displayMetrics.frequencyHz,
     volumeDb: displayMetrics.volumeDb,
     enabled: isActive && coachingMode === "karaoke",
+    keyShiftSemitones: keyShift,
   });
 
   const isPitchWarn =
@@ -492,6 +497,78 @@ export default function VocalDashboard() {
       noteName: "—",
     });
     setIsVolumeWarn(false);
+  }, [isActive]);
+
+  // ── Guide Melody Synth (Web Audio sine wave guide tones) ───────────────
+  const guideOscRef = useRef<OscillatorNode | null>(null);
+  const guideGainRef = useRef<GainNode | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    const shouldPlay = isActive && coachingMode === "karaoke" && !isPaused && syllableTracker.activeSyllable && guideMelodyEnabled;
+    const targetHz = syllableTracker.activeSyllable
+      ? shiftHz(syllableTracker.activeSyllable.expectedHz, keyShift)
+      : 0;
+
+    if (!shouldPlay || targetHz <= 0) {
+      if (guideGainRef.current) {
+        guideGainRef.current.gain.setTargetAtTime(0, audioCtxRef.current?.currentTime ?? 0, 0.05);
+      }
+      return;
+    }
+
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => {});
+      }
+
+      if (!guideGainRef.current) {
+        const gain = ctx.createGain();
+        gain.gain.value = 0;
+        gain.connect(ctx.destination);
+        guideGainRef.current = gain;
+      }
+      const gainNode = guideGainRef.current;
+
+      if (!guideOscRef.current) {
+        const osc = ctx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(targetHz, ctx.currentTime);
+        osc.connect(gainNode);
+        osc.start();
+        guideOscRef.current = osc;
+      } else {
+        guideOscRef.current.frequency.setTargetAtTime(targetHz, ctx.currentTime, 0.03);
+      }
+
+      gainNode.gain.setTargetAtTime(0.12, ctx.currentTime, 0.05);
+    } catch (err) {
+      console.warn("Failed to play guide synth note:", err);
+    }
+  }, [isActive, coachingMode, isPaused, syllableTracker.activeSyllable, keyShift, guideMelodyEnabled]);
+
+  useEffect(() => {
+    if (!isActive) {
+      if (guideOscRef.current) {
+        try {
+          guideOscRef.current.stop();
+          guideOscRef.current.disconnect();
+        } catch {}
+        guideOscRef.current = null;
+      }
+      if (guideGainRef.current) {
+        guideGainRef.current.disconnect();
+        guideGainRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
+    }
   }, [isActive]);
 
   // ── Canvas Waveform Visualizer ─────────────────────────────────────────
@@ -839,8 +916,10 @@ export default function VocalDashboard() {
     [isConnected, sendTelemetry]
   );
 
-  // ── Auto-detect sustained vocal faults ────────────────────────────────
+  // ── Auto-detect sustained vocal faults (Disabled to prevent session breaks) ──
   useEffect(() => {
+    // We disable automatic pauses to let the user practice continuously without interruptions
+    /*
     if (!isConnected || !isActive || isPaused) return;
 
     const timers: ReturnType<typeof setTimeout>[] = [];
@@ -860,6 +939,7 @@ export default function VocalDashboard() {
     }
 
     return () => timers.forEach(clearTimeout);
+    */
   }, [isVolumeWarn, isPitchWarn, isConnected, isActive, isPaused, sendCriticalError]);
 
   // ── Request Feedback ─────────────────────────────────────────────────
@@ -938,7 +1018,7 @@ export default function VocalDashboard() {
           </div>
         </div>
 
-        {/* Mode selector and Mic toggle */}
+        {/* Mode selector, Key Transposer, and Mic toggle */}
         <div className="flex flex-wrap items-center gap-3">
           {/* Mode Selector Tab Bar */}
           <div className="flex rounded-full bg-white/5 p-1 border border-white/5">
@@ -963,6 +1043,32 @@ export default function VocalDashboard() {
               Conversational Mode
             </button>
           </div>
+
+          {/* Key Transposer */}
+          {coachingMode === "karaoke" && (
+            <div className="flex items-center gap-2 rounded-full bg-white/5 p-1 border border-white/5 px-2">
+              <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase pl-1 pr-1">Key</span>
+              <button
+                onClick={() => setKeyShift(prev => Math.max(-6, prev - 1))}
+                disabled={keyShift <= -6}
+                className="flex h-6 w-6 items-center justify-center rounded-full bg-white/5 text-white hover:bg-white/15 transition disabled:opacity-40 disabled:hover:bg-white/5"
+                title="Lower Key"
+              >
+                <Minus className="h-3 w-3" />
+              </button>
+              <span className="w-16 text-center text-xs font-mono font-bold text-violet-400">
+                {keyShift === 0 ? "Original" : keyShift > 0 ? `+${keyShift} sem` : `${keyShift} sem`}
+              </span>
+              <button
+                onClick={() => setKeyShift(prev => Math.min(6, prev + 1))}
+                disabled={keyShift >= 6}
+                className="flex h-6 w-6 items-center justify-center rounded-full bg-white/5 text-white hover:bg-white/15 transition disabled:opacity-40 disabled:hover:bg-white/5"
+                title="Raise Key"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            </div>
+          )}
 
           <button
             onClick={handleSessionToggle}
@@ -1027,6 +1133,22 @@ export default function VocalDashboard() {
                 <h2 className="text-sm font-semibold text-[var(--color-text-secondary)]">
                   Pitch Lane — {ACTIVE_SONG.metadata.songname}
                 </h2>
+
+                {/* Guide melody toggle */}
+                {isActive && (
+                  <button
+                    onClick={() => setGuideMelodyEnabled(prev => !prev)}
+                    className={`ml-3 rounded-full px-3 py-1 text-[10px] font-bold border transition ${
+                      guideMelodyEnabled
+                        ? "bg-violet-600/20 text-violet-300 border-violet-500/30 hover:bg-violet-600/30"
+                        : "bg-zinc-800 text-zinc-400 border-zinc-700 hover:bg-zinc-700"
+                    }`}
+                    title="Toggle Melody Guide Synth"
+                  >
+                    Guide Synth: {guideMelodyEnabled ? "ON" : "OFF"}
+                  </button>
+                )}
+
                 {isPaused && (
                   <span className="ml-auto flex items-center gap-1 text-xs text-amber-400">
                     <Pause className="h-3 w-3" /> Paused
@@ -1039,6 +1161,15 @@ export default function VocalDashboard() {
                 )}
               </div>
 
+              {keyShift !== 0 && (
+                <div className="bg-amber-500/10 border-b border-amber-500/20 px-5 py-2 flex items-center gap-2 text-amber-400/90">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                  <span className="text-[11px] font-medium leading-normal">
+                    Target notes transposed. The instrument track remains in the original key. Try humming or singing along in your comfortable octave!
+                  </span>
+                </div>
+              )}
+
               <div className="p-3">
                 <PitchLane
                   song={ACTIVE_SONG}
@@ -1047,6 +1178,7 @@ export default function VocalDashboard() {
                   activeSyllable={syllableTracker.activeSyllable}
                   pitchDeltaCents={syllableTracker.pitchDeltaCents}
                   completedResults={syllableTracker.completedResults}
+                  keyShiftSemitones={keyShift}
                 />
               </div>
             </section>
@@ -1194,6 +1326,7 @@ export default function VocalDashboard() {
                 livePitchHz={displayMetrics.frequencyHz}
                 activeSyllable={syllableTracker.activeSyllable}
                 pitchDeltaCents={syllableTracker.pitchDeltaCents}
+                keyShiftSemitones={keyShift}
               />
             </section>
           )}

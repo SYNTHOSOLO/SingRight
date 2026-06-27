@@ -186,7 +186,7 @@ const { syllables, lineGroups } = parseCsv(
 
 export const SONG_EN001A: SongBundle = {
   id: "en001a",
-  audioSrc: "/api/audio/en001a",
+  audioSrc: "/songs/en001a.wav",
   metadata: METADATA,
   syllables,
   lyricLines: LYRIC_LINES,

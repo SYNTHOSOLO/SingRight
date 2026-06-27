@@ -26,7 +26,7 @@ export interface UseVocalAnalyzerReturn {
   stop: () => void;
 }
 
-const DEFAULT_FFT_SIZE = 2048;
+const DEFAULT_FFT_SIZE = 4096;
 const EMPTY_METRICS: VocalMetrics = {
   volumeDb: -100,
   frequencyHz: 0,
@@ -35,6 +35,17 @@ const EMPTY_METRICS: VocalMetrics = {
   isVoiced: false,
   noteName: "—",
 };
+
+// Sliding median buffer for frame-to-frame pitch stability
+const pitchHistoryBuffer: number[] = [];
+const MEDIAN_FRAMES = 5;
+const MAX_JUMP_SEMITONES = 12; // reject any frame that jumps more than an octave
+
+function getMedian(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
 
 export function useVocalAnalyzer(
   options: UseVocalAnalyzerOptions = {}
@@ -73,14 +84,35 @@ export function useVocalAnalyzer(
     const volumeDb = rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
 
     const pitch = detectPitchYin(timeDomain, audioCtx.sampleRate);
+    let finalFrequencyHz = pitch.isVoiced ? pitch.frequencyHz : 0;
+
+    if (finalFrequencyHz > 0) {
+      const lastPitch = pitchHistoryBuffer[pitchHistoryBuffer.length - 1];
+      if (lastPitch && lastPitch > 0) {
+        const jumpSemitones = Math.abs(1200 * Math.log2(finalFrequencyHz / lastPitch)) / 100;
+        if (jumpSemitones > MAX_JUMP_SEMITONES) {
+          // Reject jump, return previous median
+          finalFrequencyHz = pitchHistoryBuffer.length > 0 ? getMedian(pitchHistoryBuffer) : 0;
+        }
+      }
+      if (finalFrequencyHz > 0) {
+        pitchHistoryBuffer.push(finalFrequencyHz);
+        if (pitchHistoryBuffer.length > MEDIAN_FRAMES) {
+          pitchHistoryBuffer.shift();
+        }
+        finalFrequencyHz = getMedian(pitchHistoryBuffer);
+      }
+    } else {
+      pitchHistoryBuffer.length = 0;
+    }
 
     const snapshot: VocalMetrics = {
       volumeDb: Math.round(volumeDb * 10) / 10,
-      frequencyHz: pitch.frequencyHz,
+      frequencyHz: Math.round(finalFrequencyHz * 10) / 10,
       pitchConfidence: pitch.confidence,
       clarity: pitch.clarity,
-      isVoiced: pitch.isVoiced,
-      noteName: pitch.noteName,
+      isVoiced: finalFrequencyHz > 0,
+      noteName: finalFrequencyHz > 0 ? pitch.noteName : "—",
     };
 
     callbackRef.current?.(snapshot);
@@ -112,7 +144,7 @@ export function useVocalAnalyzer(
         const source = audioCtx.createMediaStreamSource(stream);
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = fftSize;
-        analyser.smoothingTimeConstant = 0.2;
+        analyser.smoothingTimeConstant = 0; // time-domain pitch detection needs raw samples
         source.connect(analyser);
 
         audioCtxRef.current = audioCtx;

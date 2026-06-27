@@ -7,7 +7,8 @@ import {
   PITCH_WARN_CENTS,
   SYLLABLE_VOICED_RATIO,
   VOLUME_SILENCE_THRESHOLD_DB,
-  centsDeviation,
+  shiftHz,
+  nearestOctaveCentsDeviation,
 } from "@/lib/songs/pitch";
 
 export interface UseSyllableTrackerOptions {
@@ -16,6 +17,7 @@ export interface UseSyllableTrackerOptions {
   livePitchHz: number;
   volumeDb: number;
   enabled: boolean;
+  keyShiftSemitones?: number;
 }
 
 export interface SyllableTrackerState {
@@ -54,10 +56,10 @@ function classifyIssue(
     return { issue: "missed", pitchErrorCents: 0 };
   }
   if (minVolume < VOLUME_SILENCE_THRESHOLD_DB) {
-    return { issue: "quiet", pitchErrorCents: centsDeviation(medianPitch, expectedHz) };
+    return { issue: "quiet", pitchErrorCents: nearestOctaveCentsDeviation(medianPitch, expectedHz) };
   }
 
-  const cents = centsDeviation(medianPitch, expectedHz);
+  const cents = nearestOctaveCentsDeviation(medianPitch, expectedHz);
   if (Math.abs(cents) <= PITCH_CLEAR_CENTS) {
     return { issue: "ok", pitchErrorCents: cents };
   }
@@ -70,7 +72,7 @@ function classifyIssue(
 export function useSyllableTracker(
   options: UseSyllableTrackerOptions
 ): SyllableTrackerState {
-  const { song, elapsedSec, livePitchHz, volumeDb, enabled } = options;
+  const { song, elapsedSec, livePitchHz, volumeDb, enabled, keyShiftSemitones = 0 } = options;
 
   const [completedResults, setCompletedResults] = useState<SyllableResult[]>([]);
   const samplesRef = useRef<Map<string, Sample[]>>(new Map());
@@ -85,10 +87,12 @@ export function useSyllableTracker(
 
   const activeLyricLineIdx = activeSyllable?.lyricLineIdx ?? -1;
 
-  const expectedPitchHz = activeSyllable?.expectedHz ?? 0;
+  const expectedPitchHz = activeSyllable
+    ? shiftHz(activeSyllable.expectedHz, keyShiftSemitones)
+    : 0;
   const pitchDeltaCents =
     activeSyllable && livePitchHz > 0 && expectedPitchHz > 0
-      ? centsDeviation(livePitchHz, expectedPitchHz)
+      ? nearestOctaveCentsDeviation(livePitchHz, expectedPitchHz)
       : 0;
 
   const isOnPitch =
@@ -143,9 +147,10 @@ export function useSyllableTracker(
         ? (firstVoiced.t - syllable.start) * 1000
         : 0;
 
+      const targetHz = shiftHz(syllable.expectedHz, keyShiftSemitones);
       const { issue, pitchErrorCents } = classifyIssue(
         medianPitch,
-        syllable.expectedHz,
+        targetHz,
         voicedRatio,
         minVolume
       );

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { SongBundle, SyllableAnnotation } from "@/lib/songs/types";
-import { PITCH_WARN_CENTS } from "@/lib/songs/pitch";
+import { PITCH_WARN_CENTS, shiftHz } from "@/lib/songs/pitch";
 
 interface PitchContourChartProps {
   song: SongBundle;
@@ -10,6 +10,7 @@ interface PitchContourChartProps {
   livePitchHz: number;
   activeSyllable: SyllableAnnotation | null;
   pitchDeltaCents: number;
+  keyShiftSemitones?: number;
 }
 
 interface TracePoint {
@@ -25,6 +26,7 @@ export default function PitchContourChart({
   livePitchHz,
   activeSyllable,
   pitchDeltaCents,
+  keyShiftSemitones = 0,
 }: PitchContourChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const traceRef = useRef<TracePoint[]>([]);
@@ -34,6 +36,9 @@ export default function PitchContourChart({
       traceRef.current.push({ t: elapsedSec, hz: livePitchHz });
       const cutoff = elapsedSec - TRACE_WINDOW_SEC;
       traceRef.current = traceRef.current.filter((p) => p.t >= cutoff);
+    } else {
+      // Clear trace immediately on silence to avoid drawing connecting lines
+      traceRef.current = [];
     }
   }, [elapsedSec, livePitchHz]);
 
@@ -53,8 +58,8 @@ export default function PitchContourChart({
     const w = rect.width;
     const h = rect.height;
     const duration = song.durationSec;
-    const minHz = 200;
-    const maxHz = 520;
+    const minHz = shiftHz(200, keyShiftSemitones);
+    const maxHz = shiftHz(520, keyShiftSemitones);
 
     const xForTime = (t: number) => (t / duration) * w;
     const yForHz = (hz: number) =>
@@ -69,7 +74,7 @@ export default function PitchContourChart({
     for (const s of song.syllables) {
       const x1 = xForTime(s.start);
       const x2 = xForTime(s.end);
-      const y = yForHz(s.expectedHz);
+      const y = yForHz(shiftHz(s.expectedHz, keyShiftSemitones));
       ctx.moveTo(x1, y);
       ctx.lineTo(x2, y);
     }
@@ -87,18 +92,30 @@ export default function PitchContourChart({
       ctx.fillRect(x1, 0, x2 - x1, h);
     }
 
-    // Live trace
+    // Live trace with gap detection
     const trace = traceRef.current;
+    const MAX_GAP_SEC = 0.15;
     if (trace.length > 1) {
       ctx.strokeStyle = "rgba(34, 211, 238, 0.9)";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      trace.forEach((p, i) => {
+      let first = true;
+      for (let i = 0; i < trace.length; i++) {
+        const p = trace[i];
+        if (i > 0 && p.t - trace[i - 1].t > MAX_GAP_SEC) {
+          ctx.stroke();
+          ctx.beginPath();
+          first = true;
+        }
         const x = xForTime(p.t);
         const y = yForHz(p.hz);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
+        if (first) {
+          ctx.moveTo(x, y);
+          first = false;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
       ctx.stroke();
     }
 
@@ -110,7 +127,7 @@ export default function PitchContourChart({
     ctx.moveTo(playX, 0);
     ctx.lineTo(playX, h);
     ctx.stroke();
-  }, [song, elapsedSec, livePitchHz, activeSyllable, pitchDeltaCents]);
+  }, [song, elapsedSec, livePitchHz, activeSyllable, pitchDeltaCents, keyShiftSemitones]);
 
   return (
     <canvas

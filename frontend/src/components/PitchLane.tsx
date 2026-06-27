@@ -29,11 +29,7 @@ const BOX_HEIGHT = 32;
 const TRAIL_MAX = 60;
 const PAD_Y = 28;
 
-/** Logarithmic Y axis — covers all voice types (80 Hz = deep bass, 700 Hz = high soprano) */
-const MIN_HZ = 80;
-const MAX_HZ = 700;
-const LOG_MIN = Math.log2(MIN_HZ);
-const LOG_MAX = Math.log2(MAX_HZ);
+// Dynamic bounds are calculated within the component body to prevent mushing
 
 /** Musical note reference grid to show on the left ruler */
 const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"] as const;
@@ -108,15 +104,45 @@ export default function PitchLane({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const trailRef = useRef<TrailPoint[]>([]);
 
-  // ── Accumulate pitch trail points ────────────────────────────────────────
+  // Find song MIDI range dynamically to fit the notes nicely
+  const midiPitches = song.syllables.map((s) => s.pitchMidi);
+  const songMinMidi = midiPitches.length > 0 ? Math.min(...midiPitches) : 60;
+  const songMaxMidi = midiPitches.length > 0 ? Math.max(...midiPitches) : 72;
+
+  // Add 4 semitones margin below and above, and apply key shift
+  const displayMinMidi = songMinMidi + keyShiftSemitones - 4;
+  const displayMaxMidi = songMaxMidi + keyShiftSemitones + 4;
+
+  const minHz = 440 * Math.pow(2, (displayMinMidi - 69) / 12);
+  const maxHz = 440 * Math.pow(2, (displayMaxMidi - 69) / 12);
+  const logMin = Math.log2(minHz);
+  const logMax = Math.log2(maxHz);
+
+  // ── Accumulate pitch trail points (folding octaves to make visualization clean) ──────────────────
   useEffect(() => {
     if (livePitchHz > 0) {
-      trailRef.current.push({ t: elapsedSec, hz: livePitchHz });
+      let foldedHz = livePitchHz;
+      if (activeSyllable) {
+        const shiftedTarget = shiftHz(activeSyllable.expectedHz, keyShiftSemitones);
+        let bestDiff = Infinity;
+        let bestPitch = livePitchHz;
+        for (let o = -3; o <= 3; o++) {
+          const candidate = livePitchHz * Math.pow(2, o);
+          const diff = Math.abs(Math.log2(candidate / shiftedTarget));
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            bestPitch = candidate;
+          }
+        }
+        foldedHz = bestPitch;
+      }
+      trailRef.current.push({ t: elapsedSec, hz: foldedHz });
       if (trailRef.current.length > TRAIL_MAX) trailRef.current = trailRef.current.slice(-TRAIL_MAX);
     } else {
-      if (trailRef.current.length > 4) trailRef.current = trailRef.current.slice(-4);
+      // Immediately wipe the trail on silence — avoids lingering vertical spikes
+      trailRef.current = [];
     }
-  }, [elapsedSec, livePitchHz]);
+  }, [elapsedSec, livePitchHz, activeSyllable, keyShiftSemitones]);
 
   // ── Main draw effect ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -142,8 +168,8 @@ export default function PitchLane({
 
     // ── Coordinate helpers ─────────────────────────────────────────────────
     const yForHz = (hz: number): number => {
-      const clamped = Math.max(MIN_HZ, Math.min(MAX_HZ, hz));
-      return PAD_Y + (1 - (Math.log2(clamped) - LOG_MIN) / (LOG_MAX - LOG_MIN)) * (H - PAD_Y * 2);
+      const clamped = Math.max(minHz, Math.min(maxHz, hz));
+      return PAD_Y + (1 - (Math.log2(clamped) - logMin) / (logMax - logMin)) * (H - PAD_Y * 2);
     };
 
     /** Map a song time (sec) to canvas X, starting after the ruler */
@@ -161,10 +187,8 @@ export default function PitchLane({
     ctx.fillRect(0, 0, RULER_W, H);
 
     // Draw note name grid lines for key notes across the visible range
-    // Show every natural note and some accidentals from MIDI 43 (G2) to MIDI 79 (G5)
-    for (let midi = 43; midi <= 79; midi++) {
+    for (let midi = displayMinMidi; midi <= displayMaxMidi; midi++) {
       const noteHz = midiToHz(midi);
-      if (noteHz < MIN_HZ || noteHz > MAX_HZ) continue;
       const y = yForHz(noteHz);
       const noteName = midiToNoteName(midi);
       const isNatural = !noteName.includes("#");
@@ -177,7 +201,7 @@ export default function PitchLane({
       ctx.lineTo(W, y);
       ctx.stroke();
 
-      // Ruler label — only draw natural notes (C, D, E, F, G, A, B)
+      // Ruler label — only draw natural notes
       if (isNatural) {
         ctx.fillStyle = "rgba(255,255,255,0.30)";
         ctx.font = "bold 9px Inter, system-ui, sans-serif";
@@ -309,10 +333,13 @@ export default function PitchLane({
 
     // ── Pitch trail ────────────────────────────────────────────────────────
     const trail = trailRef.current;
+    const MAX_GAP_SEC = 0.15; // don't draw connecting lines across gaps > 150ms
     if (trail.length > 1) {
       for (let i = 1; i < trail.length; i++) {
         const p0 = trail[i - 1];
         const p1 = trail[i];
+        // Skip segment if there's a time gap (user paused / stopped briefly)
+        if (p1.t - p0.t > MAX_GAP_SEC) continue;
         const alpha = (i / trail.length) * 0.65;
         ctx.strokeStyle = `rgba(34,211,238,${alpha.toFixed(2)})`;
         ctx.lineWidth = 2.5;
@@ -330,7 +357,25 @@ export default function PitchLane({
     // ── Live pitch dot ─────────────────────────────────────────────────────
     if (livePitchHz > 0) {
       const dotX = playheadX;
-      const dotY = yForHz(livePitchHz);
+      
+      // Fold live pitch to display octave closest to target
+      let displayLivePitchHz = livePitchHz;
+      if (activeSyllable) {
+        const shiftedTarget = shiftHz(activeSyllable.expectedHz, keyShiftSemitones);
+        let bestDiff = Infinity;
+        let bestPitch = livePitchHz;
+        for (let o = -3; o <= 3; o++) {
+          const candidate = livePitchHz * Math.pow(2, o);
+          const diff = Math.abs(Math.log2(candidate / shiftedTarget));
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            bestPitch = candidate;
+          }
+        }
+        displayLivePitchHz = bestPitch;
+      }
+
+      const dotY = yForHz(displayLivePitchHz);
       const R = 10;
 
       // Octave-insensitive colour: green if hitting any octave of active target

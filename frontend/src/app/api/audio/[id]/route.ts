@@ -17,26 +17,47 @@ export async function GET(
     return NextResponse.json({ error: "Invalid song ID" }, { status: 400 });
   }
 
-  const wavPath = path.resolve(
-    process.cwd(),
-    "..",
-    "alphabet_data",
-    "wav",
-    `${id}.wav`
-  );
+  const candidates = [
+    // Next.js run from 'frontend' dir, referencing parent 'alphabet_data'
+    path.resolve(process.cwd(), "..", "alphabet_data", "wav", `${id}.wav`),
+    // Next.js run from workspace root, referencing 'alphabet_data'
+    path.resolve(process.cwd(), "alphabet_data", "wav", `${id}.wav`),
+    // Next.js run from 'frontend' dir, referencing local public songs
+    path.resolve(process.cwd(), "public", "songs", `${id}.wav`),
+    // Next.js run from workspace root, referencing frontend public songs
+    path.resolve(process.cwd(), "frontend", "public", "songs", `${id}.wav`),
+  ];
 
-  try {
-    const buffer = await fs.readFile(wavPath);
-    return new Response(buffer, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/wav",
-        "Content-Length": String(buffer.length),
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "public, max-age=3600",
-      },
-    });
-  } catch {
-    return NextResponse.json({ error: `Song not found: ${id}` }, { status: 404 });
+  let buffer: Buffer | null = null;
+  let lastError: Error | null = null;
+
+  for (const candidate of candidates) {
+    try {
+      buffer = await fs.readFile(candidate);
+      break;
+    } catch (err: any) {
+      lastError = err;
+    }
   }
+
+  if (!buffer) {
+    return NextResponse.json(
+      {
+        error: `Song not found: ${id}`,
+        message: lastError?.message,
+        searchedPaths: candidates,
+      },
+      { status: 404 }
+    );
+  }
+
+  return new Response(new Uint8Array(buffer), {
+    status: 200,
+    headers: {
+      "Content-Type": "audio/wav",
+      "Content-Length": String(buffer.length),
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "public, max-age=3600",
+    },
+  });
 }
