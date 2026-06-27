@@ -34,19 +34,27 @@ export async function GET(request: Request) {
     });
     const token = await at.toJwt();
 
-    // 2. Programmatically dispatch the agent to the room via the LiveKit API.
-    //    This triggers the backend worker's entrypoint for unnamed agents.
-    //    We convert wss:// → https:// for the REST API.
+    // 2. Only dispatch the agent if there is no existing dispatch for this room.
+    //    This prevents duplicate agents when the token endpoint is called multiple times.
     const httpUrl = livekitUrl.replace(/^wss?:\/\//, "https://");
     const dispatchClient = new AgentDispatchClient(httpUrl, apiKey, apiSecret);
+
     try {
-      // agent_name="" dispatches to any unnamed worker (our agent)
-      await dispatchClient.createDispatch(room, "", {
-        metadata: JSON.stringify({ mode: "vocal-coach", participant: identity }),
-      });
+      const existingDispatches = await dispatchClient.listDispatch(room);
+      if (existingDispatches.length === 0) {
+        // No agent in this room yet — create one dispatch
+        await dispatchClient.createDispatch(room, "", {
+          metadata: JSON.stringify({ mode: "vocal-coach", participant: identity }),
+        });
+        console.log(`[token] Agent dispatched to room: ${room}`);
+      } else {
+        console.log(
+          `[token] Agent already dispatched to room: ${room} (${existingDispatches.length} dispatch(es))`
+        );
+      }
     } catch (dispatchErr: any) {
-      // Dispatch might fail if the agent is already in the room — that's fine
-      console.warn("Agent dispatch warning:", dispatchErr?.message ?? dispatchErr);
+      // Non-fatal: log but don't block the token from being returned
+      console.warn("[token] Agent dispatch warning:", dispatchErr?.message ?? dispatchErr);
     }
 
     return NextResponse.json({ token });
