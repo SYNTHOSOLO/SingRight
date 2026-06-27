@@ -8,6 +8,14 @@
   A real-time AI-powered vocal coaching application built with <strong>Next.js</strong>, <strong>LiveKit WebRTC</strong>, and <strong>OpenAI Realtime Multimodal Audio</strong>.
 </p>
 
+<p align="center">
+  <strong>Amirreza Alasti</strong> · <strong>Efe Erdal</strong> · <strong>Niloufar Ghandeharioun</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
+</p>
+
 ## Features
 
 - **Live pitch analysis** — Web Audio API pitch detection with volume, clarity, and cent-level accuracy vs. expected syllable targets
@@ -177,3 +185,26 @@ The bundled demo song is **Alphabet** (`en001a`). Song definitions are compiled 
 │   └── public/songs/                   # Local WAV fallback (setup.sh links en001a)
 └── images/                             # Logo and architecture diagram
 ```
+
+## Citation
+
+If you use this project in research or publications, please cite:
+
+```bibtex
+@software{singright2026,
+  author  = {Alasti, Amirreza and Erdal, Efe and Ghandeharioun, Niloufar},
+  title   = {Interactive AI Vocal Coach},
+  year    = {2026},
+  url     = {https://github.com/SYNTHOSOLO/SingRight}
+}
+```
+
+## Authors
+
+- **Amirreza Alasti**
+- **Efe Erdal**
+- **Niloufar Ghandeharioun**
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
